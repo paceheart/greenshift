@@ -17,6 +17,11 @@
 //! A test's identity is its suite plus its name. The suite is the testcase's
 //! `classname` when it has a non-empty one, and otherwise the `name` of the
 //! innermost enclosing `<testsuite>`, and empty when neither gives one.
+//!
+//! Text the parser takes from the file (test and suite names, and the
+//! root tag, attribute values and entity names its errors quote) is
+//! [`Tainted`], so it prints escaped. quick-xml's own messages, which can
+//! quote the file, are escaped when the error is made.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -55,8 +60,8 @@ impl fmt::Display for Outcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestCase {
     /// `classname`, or the enclosing suite's name when there is none.
-    pub suite: String,
-    pub name: String,
+    pub suite: Tainted,
+    pub name: Tainted,
     pub outcome: Outcome,
     /// `time` rounded to whole milliseconds; `None` when the producer gave no time.
     pub duration_ms: Option<i64>,
@@ -85,10 +90,10 @@ pub enum JunitError {
     // it as `{:?}` would, since it quotes text from the file.
     #[error("malformed XML at byte {position}: {message}")]
     Xml { position: u64, message: String },
-    #[error("malformed XML at byte {position}: unrecognized entity {name:?}")]
-    UnknownEntity { position: u64, name: String },
-    #[error("not JUnit XML: root element is {0:?}, expected <testsuites> or <testsuite>")]
-    WrongRoot(String),
+    #[error("malformed XML at byte {position}: unrecognized entity \"{name}\"")]
+    UnknownEntity { position: u64, name: Tainted },
+    #[error("not JUnit XML: root element is \"{0}\", expected <testsuites> or <testsuite>")]
+    WrongRoot(Tainted),
     #[error("not JUnit XML: no root element")]
     Empty,
     #[error("malformed XML: unexpected end of document")]
@@ -97,11 +102,11 @@ pub enum JunitError {
     OutsideRoot { position: u64 },
     #[error("malformed JUnit at byte {position}: <testcase> without a name attribute")]
     MissingName { position: u64 },
-    #[error("malformed JUnit at byte {position}: <testcase name={name:?}> has time={time:?}, expected seconds")]
+    #[error("malformed JUnit at byte {position}: <testcase name=\"{name}\"> has time=\"{time}\", expected seconds")]
     BadTime {
         position: u64,
-        name: String,
-        time: String,
+        name: Tainted,
+        time: Tainted,
     },
 }
 
@@ -118,8 +123,8 @@ pub fn parse_file(path: &Path) -> Result<Report, JunitError> {
 /// The outcome-deciding children seen so far in one testcase.
 #[derive(Debug, Default)]
 struct CaseBuilder {
-    suite: String,
-    name: String,
+    suite: Tainted,
+    name: Tainted,
     duration_ms: Option<i64>,
     failure: bool,
     error: bool,
@@ -165,7 +170,7 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
     let mut seen_root = false;
     let mut depth: usize = 0;
     // Names of the enclosing <testsuite> elements, with the depth each opened at.
-    let mut suites: Vec<(usize, String)> = Vec::new();
+    let mut suites: Vec<(usize, Tainted)> = Vec::new();
     // The open <testcase>, with the depth it opened at.
     let mut case: Option<(usize, CaseBuilder)> = None;
 
@@ -186,7 +191,7 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
                     seen_root = true;
                     if tag != b"testsuites" && tag != b"testsuite" {
                         return Err(JunitError::WrongRoot(
-                            String::from_utf8_lossy(tag).into_owned(),
+                            String::from_utf8_lossy(tag).into_owned().into(),
                         ));
                     }
                 }
@@ -269,9 +274,9 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
 /// attributes or references): the reader has no position for those.
 ///
 /// quick-xml's messages quote text from the file (tag names, entity names)
-/// verbatim, so they are escaped as `{:?}` escapes the other variants'
-/// file text (control and invisible characters such as bidi overrides, and
-/// backslash), except that quotes are left alone, before they can reach a
+/// verbatim, so they are escaped the way [`Tainted`] displays the other
+/// variants' file text (control and invisible characters such as bidi
+/// overrides, and backslash; quotes are left alone) before they can reach a
 /// terminal.
 fn xml_err(position: u64, source: quick_xml::Error) -> JunitError {
     JunitError::Xml {
@@ -350,24 +355,26 @@ impl fmt::Display for Tainted {
 
 fn start_case(
     e: &BytesStart<'_>,
-    suites: &[(usize, String)],
+    suites: &[(usize, Tainted)],
     position: u64,
 ) -> Result<CaseBuilder, JunitError> {
-    let Some(name) = attr(e, b"name", position)?.filter(|n| !n.is_empty()) else {
+    let Some(name) = attr(e, b"name", position)?.filter(|n| !n.as_raw().is_empty()) else {
         return Err(JunitError::MissingName { position });
     };
-    let classname = attr(e, b"classname", position)?.filter(|c| !c.is_empty());
+    let classname = attr(e, b"classname", position)?.filter(|c| !c.as_raw().is_empty());
     let suite = classname
         .or_else(|| suites.last().map(|(_, s)| s.clone()))
         .unwrap_or_default();
     let duration_ms = match attr(e, b"time", position)? {
         None => None,
-        Some(t) if t.trim().is_empty() => None,
-        Some(t) => Some(seconds_to_ms(&t).ok_or_else(|| JunitError::BadTime {
-            position,
-            name: name.clone(),
-            time: t.clone(),
-        })?),
+        Some(t) if t.as_raw().trim().is_empty() => None,
+        Some(t) => Some(
+            seconds_to_ms(t.as_raw()).ok_or_else(|| JunitError::BadTime {
+                position,
+                name: name.clone(),
+                time: t.clone(),
+            })?,
+        ),
     };
     Ok(CaseBuilder {
         suite,
@@ -396,7 +403,7 @@ fn seconds_to_ms(text: &str) -> Option<i64> {
 /// the element: quick-xml's attribute and escape errors carry positions
 /// relative to the tag or the attribute value, which would read as file
 /// offsets, so they are reported without them.
-fn attr(e: &BytesStart<'_>, key: &[u8], position: u64) -> Result<Option<String>, JunitError> {
+fn attr(e: &BytesStart<'_>, key: &[u8], position: u64) -> Result<Option<Tainted>, JunitError> {
     use quick_xml::escape::EscapeError;
     use quick_xml::events::attributes::AttrError;
     for a in e.attributes() {
@@ -421,9 +428,12 @@ fn attr(e: &BytesStart<'_>, key: &[u8], position: u64) -> Result<Option<String>,
         })?;
         if a.key.local_name().as_ref() == key {
             return match a.unescape_value() {
-                Ok(v) => Ok(Some(v.into_owned())),
+                Ok(v) => Ok(Some(v.into_owned().into())),
                 Err(quick_xml::Error::Escape(EscapeError::UnrecognizedEntity(_, name))) => {
-                    Err(JunitError::UnknownEntity { position, name })
+                    Err(JunitError::UnknownEntity {
+                        position,
+                        name: name.into(),
+                    })
                 }
                 Err(quick_xml::Error::Escape(EscapeError::UnterminatedEntity(_))) => {
                     Err(JunitError::Xml {
@@ -449,7 +459,7 @@ fn check_ref(r: &quick_xml::events::BytesRef<'_>, position: u64) -> Result<(), J
         Some(_) => Ok(()),
         None => Err(JunitError::UnknownEntity {
             position,
-            name: name.into_owned(),
+            name: name.into_owned().into(),
         }),
     }
 }

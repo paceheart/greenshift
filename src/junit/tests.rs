@@ -8,7 +8,7 @@ fn case<'a>(report: &'a Report, suite: &str, name: &str) -> &'a TestCase {
     report
         .cases
         .iter()
-        .find(|c| c.suite == suite && c.name == name)
+        .find(|c| c.suite.as_raw() == suite && c.name.as_raw() == name)
         .unwrap_or_else(|| panic!("no case {suite} / {name} in {report:#?}"))
 }
 
@@ -23,7 +23,7 @@ fn one(xml: &str) -> TestCase {
 #[test]
 fn vaelii_reads_every_testcase_in_order() {
     let report = parse_str(VAELII).unwrap();
-    let names: Vec<_> = report.cases.iter().map(|c| c.name.as_str()).collect();
+    let names: Vec<_> = report.cases.iter().map(|c| c.name.as_raw()).collect();
     assert_eq!(
         names,
         [
@@ -85,7 +85,7 @@ fn vaelii_unresolved_var_is_skipped_with_zero_time() {
 fn nextest_reads_every_testcase_across_suites() {
     let report = parse_str(NEXTEST).unwrap();
     assert_eq!(report.cases.len(), 6);
-    let suites: Vec<_> = report.cases.iter().map(|c| c.suite.as_str()).collect();
+    let suites: Vec<_> = report.cases.iter().map(|c| c.suite.as_raw()).collect();
     assert_eq!(
         suites,
         [
@@ -147,7 +147,7 @@ fn flat_testsuite_root() {
     let c = one(
         r#"<testsuite name="widgets"><testcase classname="widgets.Cog" name="turns" time="0.5"/></testsuite>"#,
     );
-    assert_eq!(c.suite, "widgets.Cog");
+    assert_eq!(c.suite.as_raw(), "widgets.Cog");
     assert_eq!(c.duration_ms, Some(500));
 }
 
@@ -168,7 +168,7 @@ fn nested_testsuites_use_the_innermost_suite_name_without_classname() {
     let got: Vec<_> = report
         .cases
         .iter()
-        .map(|c| (c.suite.as_str(), c.name.as_str()))
+        .map(|c| (c.suite.as_raw(), c.name.as_raw()))
         .collect();
     assert_eq!(
         got,
@@ -183,21 +183,21 @@ fn nested_testsuites_use_the_innermost_suite_name_without_classname() {
 #[test]
 fn classname_wins_over_suite_name() {
     let c = one(r#"<testsuite name="bin"><testcase classname="widgets" name="x"/></testsuite>"#);
-    assert_eq!(c.suite, "widgets");
+    assert_eq!(c.suite.as_raw(), "widgets");
 }
 
 #[test]
 fn entities_in_name_and_classname_are_unescaped() {
     let c =
         one(r#"<testsuite name="s"><testcase classname="w&amp;b" name="t&#x26;u"/></testsuite>"#);
-    assert_eq!(c.suite, "w&b");
-    assert_eq!(c.name, "t&u");
+    assert_eq!(c.suite.as_raw(), "w&b");
+    assert_eq!(c.name.as_raw(), "t&u");
 }
 
 #[test]
 fn empty_classname_falls_back_to_suite_name() {
     let c = one(r#"<testsuite name="bin"><testcase classname="" name="x"/></testsuite>"#);
-    assert_eq!(c.suite, "bin");
+    assert_eq!(c.suite.as_raw(), "bin");
 }
 
 #[test]
@@ -306,7 +306,7 @@ fn suite_is_empty_without_classname_or_suite_name() {
         r#"<testsuites><testcase name="t"/></testsuites>"#,
         r#"<testsuite><testcase name="t"/></testsuite>"#,
     ] {
-        assert_eq!(one(xml).suite, "", "{xml}");
+        assert_eq!(one(xml).suite.as_raw(), "", "{xml}");
     }
 }
 
@@ -322,7 +322,7 @@ fn a_testcase_nested_in_a_testcase_is_ignored() {
             r#"<testsuite name="s"><testcase name="outer">{inner}</testcase></testsuite>"#
         ));
         assert_eq!(
-            (c.name.as_str(), c.outcome),
+            (c.name.as_raw(), c.outcome),
             ("outer", Outcome::Passed),
             "{inner}"
         );
@@ -383,7 +383,7 @@ fn empty_document_is_an_error() {
 fn non_junit_root_is_an_error() {
     let err = parse_str("<html><body/></html>").unwrap_err();
     assert!(
-        matches!(err, JunitError::WrongRoot(ref r) if r == "html"),
+        matches!(err, JunitError::WrongRoot(ref r) if r.as_raw() == "html"),
         "{err:?}"
     );
 }
@@ -409,7 +409,7 @@ fn unknown_entity_is_an_error() {
     let err = parse_str(r#"<testsuite name="s"><testcase name="t"><failure>&bogus;</failure></testcase></testsuite>"#)
         .unwrap_err();
     assert!(
-        matches!(err, JunitError::UnknownEntity { ref name, .. } if name == "bogus"),
+        matches!(err, JunitError::UnknownEntity { ref name, .. } if name.as_raw() == "bogus"),
         "{err:?}"
     );
     // The byte offset is the only position: no entity-relative range.
@@ -423,7 +423,7 @@ fn entity_declared_in_a_dtd_is_unknown() {
     )
     .unwrap_err();
     assert!(
-        matches!(err, JunitError::UnknownEntity { ref name, .. } if name == "cog"),
+        matches!(err, JunitError::UnknownEntity { ref name, .. } if name.as_raw() == "cog"),
         "{err:?}"
     );
 }
@@ -463,7 +463,7 @@ fn entity_errors_in_attributes_carry_no_attribute_relative_range() {
     let err =
         parse_str(r#"<testsuite name="s"><testcase name="t&bogus;"/></testsuite>"#).unwrap_err();
     assert!(
-        matches!(err, JunitError::UnknownEntity { position: 20, ref name } if name == "bogus"),
+        matches!(err, JunitError::UnknownEntity { position: 20, ref name } if name.as_raw() == "bogus"),
         "{err:?}"
     );
     let err = parse_str(r#"<testsuite name="s"><testcase name="t&amp"/></testsuite>"#).unwrap_err();
@@ -479,7 +479,7 @@ fn references_in_attributes_greenshift_does_not_read_are_not_checked() {
     let c = one(
         r#"<testsuites foo="&bogus;"><testsuite name="s"><testcase name="t" foo="&bogus;"><failure message="&#0;"/></testcase></testsuite></testsuites>"#,
     );
-    assert_eq!((c.suite.as_str(), c.name.as_str()), ("s", "t"));
+    assert_eq!((c.suite.as_raw(), c.name.as_raw()), ("s", "t"));
     assert_eq!(c.outcome, Outcome::Failed);
 }
 
@@ -562,7 +562,7 @@ fn wrong_root_error_escapes_control_bytes_in_the_tag_name() {
     // The tag name comes straight from the input file: a crafted root
     // element name must not be able to put a raw control byte (e.g. an
     // ANSI escape) into the error text printed to the user's terminal.
-    let err = JunitError::WrongRoot("\u{1b}[31mevil".to_string());
+    let err = JunitError::WrongRoot("\u{1b}[31mevil".into());
     let text = err.to_string();
     assert!(!text.contains('\u{1b}'), "{text:?}");
     assert!(text.contains("evil"), "{text:?}");
@@ -572,13 +572,48 @@ fn wrong_root_error_escapes_control_bytes_in_the_tag_name() {
 fn bad_time_error_escapes_control_bytes_in_name_and_time() {
     let err = JunitError::BadTime {
         position: 0,
-        name: "\u{1b}[31msprocket".to_string(),
-        time: "\u{1b}[31mbad".to_string(),
+        name: "\u{1b}[31msprocket".into(),
+        time: "\u{1b}[31mbad".into(),
     };
     let text = err.to_string();
     assert!(!text.contains('\u{1b}'), "{text:?}");
     assert!(text.contains("sprocket"), "{text:?}");
     assert!(text.contains("bad"), "{text:?}");
+}
+
+#[test]
+fn parsed_names_keep_control_bytes_raw_but_print_escaped() {
+    let report =
+        parse_str("<testsuite name=\"s\u{1b}[31m\"><testcase name=\"t\u{7}\"/></testsuite>")
+            .unwrap();
+    let c = &report.cases[0];
+    assert_eq!(
+        (c.suite.as_raw(), c.name.as_raw()),
+        ("s\u{1b}[31m", "t\u{7}")
+    );
+    assert_eq!(
+        (c.suite.to_string(), c.name.to_string()),
+        (r"s\u{1b}[31m".into(), r"t\u{7}".into())
+    );
+    let dump = format!("{report:#?}");
+    assert!(
+        !dump.chars().any(|ch| ch.is_control() && ch != '\n'),
+        "{dump:?}"
+    );
+}
+
+#[test]
+fn errors_from_parsing_escape_control_bytes_in_file_text() {
+    for xml in [
+        "<\u{1b}[31mevil/>",
+        "<testsuite name=\"s\"><testcase name=\"\u{1b}[31mevil\" time=\"\u{1b}[31mevil\"/></testsuite>",
+        "<testsuite name=\"s\"><testcase name=\"t\">&\u{1b}[31mevil;</testcase></testsuite>",
+    ] {
+        let err = parse_str(xml).unwrap_err();
+        let text = err.to_string();
+        assert!(!text.contains('\u{1b}'), "{xml:?}: {text:?}");
+        assert!(text.contains(r"\u{1b}[31mevil"), "{xml:?}: {text:?}");
+    }
 }
 
 #[test]
@@ -671,7 +706,7 @@ fn content_outside_the_root_element_is_an_error() {
 #[test]
 fn whitespace_comments_and_a_bom_around_the_root_are_fine() {
     let c = one("\u{feff}<?xml version=\"1.0\"?>\n<!-- c -->\n<testsuite name=\"s\"><testcase name=\"t\"/></testsuite>\n<!-- c -->\n");
-    assert_eq!(c.name, "t");
+    assert_eq!(c.name.as_raw(), "t");
 }
 
 #[test]
@@ -679,7 +714,7 @@ fn a_processing_instruction_after_the_root_is_fine() {
     // Unlike a declaration or a doctype, a PI is legal XML epilog content
     // (same grammar slot as a trailing comment), so it must stay accepted.
     let c = one(r#"<testsuite name="s"><testcase name="t"/></testsuite><?some-pi data?>"#);
-    assert_eq!(c.name, "t");
+    assert_eq!(c.name.as_raw(), "t");
 }
 
 #[test]
