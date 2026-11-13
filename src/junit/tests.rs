@@ -247,7 +247,7 @@ fn seconds_to_ms_rejects_the_value_that_rounds_up_to_two_to_the_63() {
 
 #[test]
 fn bad_time_is_an_error_naming_the_test() {
-    for time in ["fast", "-1", "NaN", "inf"] {
+    for time in ["fast", "-1", "NaN", "inf", "1e30"] {
         let err = parse_str(&format!(
             r#"<testsuite name="s"><testcase name="sprocket" time="{time}"/></testsuite>"#
         ))
