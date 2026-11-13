@@ -41,11 +41,13 @@ pub const DEFAULT_PATH: &str = ".greenshift/history.sqlite";
 pub const APPLICATION_ID: i32 = 0x4752_4E53;
 
 /// Schema migrations, in order. `MIGRATIONS[i]` upgrades version `i` to `i + 1`.
+///
+/// Migration 1 also stamps [`APPLICATION_ID`] via `pragma_update` in
+/// [`Store::migrate`] rather than a literal in this SQL, so the value has
+/// one source of truth instead of two copies that could drift apart.
 const MIGRATIONS: &[&str] = &[
     // 1: black-box history.
     r#"
-    PRAGMA application_id = 1196576339; -- APPLICATION_ID
-
     CREATE TABLE runs (
         id          INTEGER PRIMARY KEY,
         commit_sha  TEXT,
@@ -248,6 +250,12 @@ impl Store {
         }
         for (from, sql) in MIGRATIONS.iter().enumerate().skip(found as usize) {
             tx.execute_batch(sql).map_err(sqlite)?;
+            if from == 0 {
+                // Stamp the store exactly once, from the one constant that
+                // Store::open's own gate above compares against.
+                tx.pragma_update(None, "application_id", APPLICATION_ID)
+                    .map_err(sqlite)?;
+            }
             tx.pragma_update(None, "user_version", from as i64 + 1)
                 .map_err(sqlite)?;
         }
