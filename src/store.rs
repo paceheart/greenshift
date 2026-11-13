@@ -7,6 +7,13 @@
 //! appended to. Later inputs (diffs, coverage) arrive as new migrations that
 //! add tables keyed by `runs.id` and `tests.id`.
 //!
+//! A greenshift store is marked with `PRAGMA application_id` =
+//! [`APPLICATION_ID`], set by migration 1. Opening a SQLite file whose
+//! application_id is anything else (including 0, the SQLite default) is
+//! refused if the file already holds any schema object, so greenshift never
+//! writes into another program's database. A file with no schema at all
+//! (new, or empty) is taken over and migrated.
+//!
 //! Schema version 1:
 //!
 //! - `runs`: one row per `greenshift ingest` invocation.
@@ -24,10 +31,15 @@ use crate::junit::{Outcome, TestCase};
 /// The default store location, relative to the working directory.
 pub const DEFAULT_PATH: &str = ".greenshift/history.sqlite";
 
+/// `PRAGMA application_id` of every greenshift store: "GRNS" in ASCII.
+pub const APPLICATION_ID: i32 = 0x4752_4E53;
+
 /// Schema migrations, in order. `MIGRATIONS[i]` upgrades version `i` to `i + 1`.
 const MIGRATIONS: &[&str] = &[
     // 1: black-box history.
     r#"
+    PRAGMA application_id = 1196576339; -- APPLICATION_ID
+
     CREATE TABLE runs (
         id          INTEGER PRIMARY KEY,
         commit_sha  TEXT,
@@ -81,6 +93,14 @@ pub enum StoreError {
         path: String,
         found: i64,
         supported: i64,
+    },
+    #[error(
+        "{path} is not a greenshift history store (SQLite application_id {found}, expected {expected}); refusing to write to it"
+    )]
+    NotAStore {
+        path: String,
+        found: i32,
+        expected: i32,
     },
     #[error("history store {path} has schema version {found}, which no greenshift writes")]
     BadVersion { path: String, found: i64 },
@@ -180,6 +200,21 @@ impl Store {
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(sqlite)?;
+        let app_id: i32 = tx
+            .pragma_query_value(None, "application_id", |row| row.get(0))
+            .map_err(sqlite)?;
+        if app_id != APPLICATION_ID {
+            let objects: i64 = tx
+                .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
+                .map_err(sqlite)?;
+            if objects > 0 {
+                return Err(StoreError::NotAStore {
+                    path: path.clone(),
+                    found: app_id,
+                    expected: APPLICATION_ID,
+                });
+            }
+        }
         let found: i64 = tx
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(sqlite)?;

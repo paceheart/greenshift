@@ -205,6 +205,29 @@ fn malformed_xml_leaves_an_existing_store_unchanged() {
 }
 
 #[test]
+fn a_database_that_is_not_a_store_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("app.sqlite");
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch("CREATE TABLE notes (body TEXT); INSERT INTO notes VALUES ('mine');")
+        .unwrap();
+    drop(conn);
+    let before = std::fs::read(&db).unwrap();
+    let out = ingest(&db, &[fixture("nextest.xml")], &[])
+        .failure()
+        .code(1);
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains(&format!(
+            "{} is not a greenshift history store",
+            db.display()
+        )),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read(&db).unwrap(), before, "file was modified");
+}
+
+#[test]
 fn missing_file_fails_and_names_it() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("history.sqlite");

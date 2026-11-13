@@ -27,6 +27,8 @@ greenshift ingest target/nextest/default/junit.xml \
 ```
 
 - `--db` defaults to `.greenshift/history.sqlite`; the directory is created.
+  greenshift only writes to its own stores: a SQLite file that already holds
+  another program's tables is refused with exit 1 and left untouched.
 - `--commit` is optional. `--source` names the producer or CI job
   (default `junit`).
 - A test is identified by suite and name. The suite is the testcase's

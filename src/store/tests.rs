@@ -127,11 +127,75 @@ fn open_creates_the_parent_directory_and_is_idempotent() {
     assert_eq!(strings(&store, "SELECT name FROM tests"), ["t"]);
 }
 
+fn application_id(store: &Store) -> i64 {
+    store
+        .conn
+        .pragma_query_value(None, "application_id", |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn a_fresh_store_is_marked_as_greenshift() {
+    let store = Store::open_in_memory().unwrap();
+    assert_eq!(application_id(&store), i64::from(APPLICATION_ID));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.sqlite");
+    drop(Store::open(&path).unwrap());
+    let store = Store::open(&path).unwrap();
+    assert_eq!(application_id(&store), i64::from(APPLICATION_ID));
+}
+
+#[test]
+fn an_empty_sqlite_file_becomes_a_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.sqlite");
+    let conn = Connection::open(&path).unwrap();
+    conn.pragma_update(None, "page_size", 8192).unwrap();
+    conn.execute_batch("VACUUM").unwrap();
+    drop(conn);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(application_id(&store), i64::from(APPLICATION_ID));
+    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+}
+
+/// Make a SQLite file at `path` that some other program owns, and return
+/// its bytes.
+fn foreign_db(path: &Path, application_id: i32) -> Vec<u8> {
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch("CREATE TABLE notes (body TEXT); INSERT INTO notes VALUES ('mine');")
+        .unwrap();
+    conn.pragma_update(None, "application_id", application_id)
+        .unwrap();
+    drop(conn);
+    std::fs::read(path).unwrap()
+}
+
+#[test]
+fn a_database_of_another_program_is_refused_and_left_alone() {
+    for foreign in [0, 0x1234_5678] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.sqlite");
+        let before = foreign_db(&path, foreign);
+        let err = Store::open(&path).unwrap_err();
+        assert!(
+            matches!(err, StoreError::NotAStore { found, .. } if found == foreign),
+            "{err:?}"
+        );
+        assert!(
+            err.to_string().contains("not a greenshift history store"),
+            "{err}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before, "file was modified");
+    }
+}
+
 #[test]
 fn store_from_a_newer_greenshift_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("history.sqlite");
     let conn = Connection::open(&path).unwrap();
+    conn.pragma_update(None, "application_id", APPLICATION_ID)
+        .unwrap();
     conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
         .unwrap();
     drop(conn);
@@ -145,6 +209,8 @@ fn store_with_a_negative_schema_version_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("history.sqlite");
     let conn = Connection::open(&path).unwrap();
+    conn.pragma_update(None, "application_id", APPLICATION_ID)
+        .unwrap();
     conn.pragma_update(None, "user_version", -1).unwrap();
     drop(conn);
     let err = Store::open(&path).unwrap_err();
