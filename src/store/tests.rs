@@ -461,6 +461,19 @@ fn same_name_in_different_suites_is_a_different_test() {
 }
 
 #[test]
+fn control_bytes_in_suite_and_name_are_stored_raw() {
+    let mut store = Store::open_in_memory().unwrap();
+    let id = store
+        .record_run(&RUN, &[tc("s\u{1b}[31m", "t\0u", Outcome::Passed, None)])
+        .unwrap()
+        .run_id;
+    assert_eq!(
+        rows(&store, id),
+        [row("s\u{1b}[31m", "t\0u", "passed", None)]
+    );
+}
+
+#[test]
 fn a_repeated_test_in_one_run_is_merged() {
     let mut store = Store::open_in_memory().unwrap();
     let recorded = store

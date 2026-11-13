@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
-use crate::junit::{Outcome, TestCase};
+use crate::junit::{Outcome, Tainted, TestCase};
 
 /// The default store location, relative to the working directory.
 pub const DEFAULT_PATH: &str = ".greenshift/history.sqlite";
@@ -323,12 +323,14 @@ impl Store {
                 .map_err(&sqlite)?;
             for c in &merged {
                 let existing: Option<i64> = find_test
-                    .query_row(params![c.suite, c.name], |r| r.get(0))
+                    .query_row(params![c.suite.as_raw(), c.name.as_raw()], |r| r.get(0))
                     .optional()
                     .map_err(&sqlite)?;
                 let test_id = match existing {
                     Some(id) => id,
-                    None => add_test.insert(params![c.suite, c.name]).map_err(&sqlite)?,
+                    None => add_test
+                        .insert(params![c.suite.as_raw(), c.name.as_raw()])
+                        .map_err(&sqlite)?,
                 };
                 add_result
                     .execute(params![run_id, test_id, c.outcome.as_str(), c.duration_ms])
@@ -388,9 +390,9 @@ fn severity(outcome: Outcome) -> u8 {
 /// Combine repeated test identities, keeping first-appearance order.
 fn merge_duplicates<'c>(cases: impl IntoIterator<Item = &'c TestCase>) -> Vec<TestCase> {
     let mut merged: Vec<TestCase> = Vec::new();
-    let mut index: HashMap<(&str, &str), usize> = HashMap::new();
+    let mut index: HashMap<(&Tainted, &Tainted), usize> = HashMap::new();
     for c in cases {
-        match index.get(&(c.suite.as_str(), c.name.as_str())) {
+        match index.get(&(&c.suite, &c.name)) {
             Some(&i) => {
                 let m = &mut merged[i];
                 if severity(c.outcome) > severity(m.outcome) {
@@ -402,7 +404,7 @@ fn merge_duplicates<'c>(cases: impl IntoIterator<Item = &'c TestCase>) -> Vec<Te
                 };
             }
             None => {
-                index.insert((c.suite.as_str(), c.name.as_str()), merged.len());
+                index.insert((&c.suite, &c.name), merged.len());
                 merged.push(c.clone());
             }
         }
