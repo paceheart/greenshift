@@ -207,7 +207,10 @@ impl Store {
     /// [`Store::open`].
     pub fn open_read_only(path: &Path) -> Result<Option<Store>, StoreError> {
         refuse_memory_path(path)?;
-        if !path.exists() {
+        // Only a file known to be missing is no history. When its existence
+        // cannot be checked (a directory on the way is unreadable, say), the
+        // open below fails and says why.
+        if matches!(path.try_exists(), Ok(false)) {
             return Ok(None);
         }
         let shown = path.display().to_string();

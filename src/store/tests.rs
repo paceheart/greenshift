@@ -713,6 +713,31 @@ fn a_read_only_open_of_a_missing_file_is_none_and_creates_nothing() {
     assert!(!dir.path().join("sub").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn a_read_only_open_of_a_file_that_cannot_be_checked_is_an_error_not_none() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let locked = dir.path().join("locked");
+    let path = locked.join("history.sqlite");
+    {
+        let mut store = Store::open(&path).unwrap();
+        store
+            .record_run(&RUN, &[tc("s", "t", Outcome::Passed, Some(1))])
+            .unwrap();
+    }
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let checkable = path.try_exists().is_ok();
+    let opened = Store::open_read_only(&path);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if checkable {
+        // Running as root: permissions are not enforced, nothing to test.
+        return;
+    }
+    let err = opened.unwrap_err();
+    assert!(matches!(err, StoreError::Sqlite { .. }), "{err:?}");
+}
+
 #[test]
 fn a_read_only_open_of_an_empty_sqlite_file_is_none_and_leaves_it_alone() {
     let dir = tempfile::tempdir().unwrap();
