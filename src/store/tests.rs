@@ -443,15 +443,24 @@ fn a_repeated_test_in_one_run_is_merged() {
                 tc("w", "steady", Outcome::Skipped, None),
                 tc("w", "half_timed", Outcome::Skipped, None),
                 tc("w", "half_timed", Outcome::Error, Some(9)),
+                // The top two ranks of the severity ladder, the only pairing
+                // an inverted failed/error order would slip through.
+                tc("w", "crashed", Outcome::Error, Some(1)),
+                tc("w", "crashed", Outcome::Failed, Some(2)),
+                // Appears once, alongside the duplicated identities above:
+                // merging them must not touch this row.
+                tc("w", "solo", Outcome::Passed, Some(3)),
             ],
         )
         .unwrap();
-    assert_eq!(recorded.results, 3);
+    assert_eq!(recorded.results, 5);
     assert_eq!(
         rows(&store, recorded.run_id),
         [
+            row("w", "crashed", "failed", Some(3)),
             row("w", "flaky", "failed", Some(12)),
             row("w", "half_timed", "error", Some(9)),
+            row("w", "solo", "passed", Some(3)),
             row("w", "steady", "passed", None),
         ]
     );
