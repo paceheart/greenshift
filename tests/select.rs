@@ -220,6 +220,36 @@ fn coverage_ends_rich_early() {
 }
 
 #[test]
+fn a_reader_that_stops_early_is_not_an_error() {
+    // More output than a pipe holds, so select is still writing when the
+    // reader goes away.
+    let cases: String = (0..5000)
+        .map(|i| format!("<testcase classname=\"s\" name=\"t{i}\" time=\"0.1\"/>"))
+        .collect();
+    let mut h = History::new();
+    h.ingest(
+        &format!("<testsuites><testsuite name=\"s\">{cases}</testsuite></testsuites>"),
+        "ci",
+    );
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("greenshift"))
+        .arg("select")
+        .arg("--db")
+        .arg(&h.db)
+        .args(["--min-runs", "1"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut first = [0u8; 4];
+    std::io::Read::read_exact(child.stdout.as_mut().unwrap(), &mut first).unwrap();
+    assert_eq!(&first, b"poor");
+    drop(child.stdout.take());
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{:?}", out.status);
+    assert_eq!(String::from_utf8(out.stderr).unwrap(), "");
+}
+
+#[test]
 fn with_both_thresholds_rich_ends_where_the_later_is_reached() {
     let h = history();
     // 50% coverage comes at the first pick, 30% confidence at the second.

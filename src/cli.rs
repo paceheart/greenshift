@@ -174,10 +174,15 @@ pub fn select(args: &SelectArgs) -> anyhow::Result<ExitCode> {
         },
     );
     let mut out = std::io::stdout().lock();
-    for line in select::lines(&analysis, estimator, decided.rich, args.min_runs) {
-        writeln!(out, "{line}")?;
+    let written = select::lines(&analysis, estimator, decided.rich, args.min_runs)
+        .iter()
+        .try_for_each(|line| writeln!(out, "{line}"))
+        .and_then(|()| out.flush());
+    match written {
+        // A reader that stops early (`| head`) has all the lines it wants.
+        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {}
+        written => written?,
     }
-    out.flush()?;
     for missed in decided.unreached {
         eprintln!("greenshift: {missed}");
     }
