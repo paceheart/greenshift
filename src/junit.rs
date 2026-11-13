@@ -158,14 +158,6 @@ impl CaseBuilder {
 /// Failure and error text is not kept: only which elements are present.
 pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
     let mut reader = Reader::from_str(xml);
-    // `position` is where the reader failed for errors from `read_event`,
-    // and the start of the event being examined for errors found after it
-    // (in attributes or references): the reader has no position for those.
-    let xml_err = |position: u64, source: quick_xml::Error| JunitError::Xml {
-        position,
-        message: source.to_string(),
-    };
-
     let mut report = Report::default();
     let mut seen_root = false;
     let mut depth: usize = 0;
@@ -208,11 +200,7 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
                         }
                     }
                     (b"testcase", None) => {
-                        let builder =
-                            start_case(e, &suites, position).map_err(|err| match err {
-                                StartCaseError::Xml(s) => xml_err(position, s),
-                                StartCaseError::Junit(j) => j,
-                            })?;
+                        let builder = start_case(e, &suites, position)?;
                         if empty {
                             report.cases.push(builder.finish());
                         } else {
@@ -273,35 +261,38 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
     }
 }
 
-enum StartCaseError {
-    Xml(quick_xml::Error),
-    Junit(JunitError),
+/// `position` is where the reader failed for errors from `read_event`, and
+/// the start of the event being examined for errors found after it (in
+/// attributes or references): the reader has no position for those.
+fn xml_err(position: u64, source: quick_xml::Error) -> JunitError {
+    JunitError::Xml {
+        position,
+        message: source.to_string(),
+    }
 }
 
 fn start_case(
     e: &BytesStart<'_>,
     suites: &[(usize, String)],
     position: u64,
-) -> Result<CaseBuilder, StartCaseError> {
-    let name = attr(e, b"name").map_err(StartCaseError::Xml)?;
-    let Some(name) = name.filter(|n| !n.is_empty()) else {
-        return Err(StartCaseError::Junit(JunitError::MissingName { position }));
+) -> Result<CaseBuilder, JunitError> {
+    let xml = |source| xml_err(position, source);
+    let Some(name) = attr(e, b"name").map_err(xml)?.filter(|n| !n.is_empty()) else {
+        return Err(JunitError::MissingName { position });
     };
     let classname = attr(e, b"classname")
-        .map_err(StartCaseError::Xml)?
+        .map_err(xml)?
         .filter(|c| !c.is_empty());
     let suite = classname
         .or_else(|| suites.last().map(|(_, s)| s.clone()))
         .unwrap_or_default();
-    let duration_ms = match attr(e, b"time").map_err(StartCaseError::Xml)? {
+    let duration_ms = match attr(e, b"time").map_err(xml)? {
         None => None,
         Some(t) if t.trim().is_empty() => None,
-        Some(t) => Some(seconds_to_ms(&t).ok_or_else(|| {
-            StartCaseError::Junit(JunitError::BadTime {
-                position,
-                name: name.clone(),
-                time: t.clone(),
-            })
+        Some(t) => Some(seconds_to_ms(&t).ok_or_else(|| JunitError::BadTime {
+            position,
+            name: name.clone(),
+            time: t.clone(),
         })?),
     };
     Ok(CaseBuilder {
