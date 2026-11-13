@@ -1,0 +1,22 @@
+[package]
+name = "greenshift"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+license = "MIT"
+description = "Test selection from test history: ingest JUnit XML into a per-repo SQLite store"
+readme = "README.md"
+keywords = ["testing", "junit", "test-selection", "ci"]
+categories = ["command-line-utilities", "development-tools::testing"]
+
+[dependencies]
+anyhow = "1.0.98"
+clap = { version = "4.5.58", features = ["derive"] }
+
+[dev-dependencies]
+assert_cmd = "2.1.2"
+predicates = "3.1.3"
+
+[profile.release]
+lto = true
+codegen-units = 1
