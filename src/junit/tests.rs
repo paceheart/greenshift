@@ -187,6 +187,13 @@ fn classname_wins_over_suite_name() {
 }
 
 #[test]
+fn entities_in_name_and_classname_are_unescaped() {
+    let c = one(r#"<testsuite name="s"><testcase classname="w&amp;b" name="t&#x26;u"/></testsuite>"#);
+    assert_eq!(c.suite, "w&b");
+    assert_eq!(c.name, "t&u");
+}
+
+#[test]
 fn empty_classname_falls_back_to_suite_name() {
     let c = one(r#"<testsuite name="bin"><testcase classname="" name="x"/></testsuite>"#);
     assert_eq!(c.suite, "bin");
@@ -335,6 +342,15 @@ fn non_junit_root_is_an_error() {
 fn testcase_without_name_is_an_error() {
     let err =
         parse_str(r#"<testsuite name="s"><testcase classname="c"/></testsuite>"#).unwrap_err();
+    assert!(matches!(err, JunitError::MissingName { .. }), "{err:?}");
+}
+
+#[test]
+fn testcase_with_an_empty_name_is_also_an_error() {
+    // Attribute-absent and attribute-present-but-empty are two different
+    // branches through start_case's Option/filter chain; both must reject.
+    let err = parse_str(r#"<testsuite name="s"><testcase name="" classname="c"/></testsuite>"#)
+        .unwrap_err();
     assert!(matches!(err, JunitError::MissingName { .. }), "{err:?}");
 }
 
