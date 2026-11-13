@@ -495,6 +495,38 @@ fn zero_milliseconds_counts_as_one() {
 }
 
 #[test]
+fn skipped_results_do_not_count_towards_min_runs() {
+    // c and d each have 120 results, but one of c's is a skip.
+    let mut runs = vec![vec![t("c", S, 5), t("d", P, 5)]];
+    runs.extend((0..119).map(|_| vec![t("c", P, 5), t("d", P, 5)]));
+    let store = store_of(&runs);
+    let a = analysis(&store, &[]).unwrap();
+    let results = |name: &str| {
+        a.tests
+            .iter()
+            .find(|t| t.name.as_raw() == name)
+            .unwrap()
+            .results
+    };
+    assert_eq!((results("c"), results("d")), (119, 120));
+    // At the default --min-runs, d is poor and c, below it, is new.
+    assert_eq!(out(&store, 120), ["poor\t100.0\t100.0\ts\td"]);
+}
+
+#[test]
+fn a_skipped_result_has_no_duration_for_the_median() {
+    // a's last five results with a duration are 10 ms passes; the newer
+    // skips at 1000 ms are not runs of it.
+    let mut runs: Vec<Vec<TestCase>> = (0..5).map(|_| vec![t("a", P, 10)]).collect();
+    runs.extend((0..3).map(|_| vec![t("a", S, 1000)]));
+    let store = store_of(&runs);
+    assert_eq!(median(&analysis(&store, &[]).unwrap(), "a"), 10.0);
+    // A test only ever skipped has no duration, so it gets the fallback.
+    let store = store_of(&[vec![t("p", P, 10), t("q", P, 30), t("r", S, 999)]]);
+    assert_eq!(median(&analysis(&store, &[]).unwrap(), "r"), 20.0);
+}
+
+#[test]
 fn no_full_run_is_no_history() {
     let store = Store::open_in_memory().unwrap();
     assert_eq!(analysis(&store, &[]), None);

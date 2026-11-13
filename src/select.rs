@@ -102,7 +102,7 @@ pub struct TestInfo {
     pub median_eighths: u128,
     /// Passed results in full runs.
     pub passes: u64,
-    /// Results of any outcome in any run read.
+    /// Passed, failed and error results (not skips) in any run read.
     pub results: u64,
 }
 
@@ -177,6 +177,8 @@ pub fn analyse(history: &History) -> Option<Analysis> {
     }
 
     // Result counts and the latest durations, newest first, over every run.
+    // A skip is not a run of the test, so it adds neither a count nor a
+    // duration.
     let mut results = vec![0u64; ids.len()];
     let mut latest: Vec<Vec<u64>> = vec![Vec::new(); ids.len()];
     for run in history.runs.iter().rev() {
@@ -184,6 +186,9 @@ pub fn analyse(history: &History) -> Option<Analysis> {
             let Some(&i) = index.get(&r.test_id) else {
                 continue;
             };
+            if r.outcome == Outcome::Skipped {
+                continue;
+            }
             results[i] += 1;
             if let Some(ms) = r.duration_ms {
                 if latest[i].len() < MEDIAN_OF {

@@ -82,10 +82,10 @@ on record, and *poor* tests, which can run after them:
   tests together fail in every failing full run; a test that fails in no
   row left is never picked.
 - **Poor.** Every other universe test with at least `--min-runs` results
-  (default 120) of any outcome, in any run read. The rest are *new* and not
-  listed.
-- **Median.** A test's duration is the median of its last 5 results that
-  have one, in any run read; a test with none gets the median of the other
+  (default 120) that passed, failed or errored, in any run read; skips do
+  not count. The rest are *new* and not listed.
+- **Median.** A test's duration is the median of its last 5 non-skipped
+  results that have one, in any run read; a test with none gets the median of the other
   tests' medians (1 ms if no test has one). 0 ms counts as 1 ms.
 
 Output is one line per test, rich in pick order, then poor by median, suite

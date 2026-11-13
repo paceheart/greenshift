@@ -101,7 +101,6 @@ fn selects_from_one_source() {
         stdout(&out),
         "rich\t50.0\t20.8\tsprocket-works\twidgets::rejects_a_bent_cog\n\
          rich\t100.0\t34.2\tsprocket-works::assembly\tassembles_a_gearbox\n\
-         poor\t100.0\t34.2\tsprocket-works\twidgets::needs_a_lathe\n\
          poor\t100.0\t34.2\tsprocket-works::assembly\tlists_parts\n\
          poor\t100.0\t34.2\tsprocket-works\twidgets::parses_a_sprocket\n\
          poor\t100.0\t34.2\tsprocket-works\twidgets::spins_eventually\n"
@@ -131,8 +130,6 @@ fn selects_from_every_source_by_default() {
     assert_eq!(
         stdout(&out),
         "rich\t100.0\t100.0\twidgets.flywheel-test\tfixtures\n\
-         poor\t100.0\t100.0\tghost-gate\tunknown-var\n\
-         poor\t100.0\t100.0\twidgets.flywheel-test\tstores-momentum\n\
          poor\t100.0\t100.0\twidgets.sprocket-test\tcounts-teeth\n\
          poor\t100.0\t100.0\twidgets.sprocket-test\tparses-a-sprocket\n\
          poor\t100.0\t100.0\twidgets.sprocket-test\trejects-a-bent-cog\n\
@@ -165,7 +162,6 @@ fn confidence_ends_rich_early() {
     assert_eq!(
         stdout(&out),
         "rich\t50.0\t66.7\tsprocket-works\twidgets::rejects_a_bent_cog\n\
-         poor\t100.0\t100.0\tsprocket-works\twidgets::needs_a_lathe\n\
          poor\t100.0\t100.0\tsprocket-works::assembly\tlists_parts\n\
          poor\t100.0\t100.0\tsprocket-works\twidgets::parses_a_sprocket\n\
          poor\t100.0\t100.0\tsprocket-works\twidgets::spins_eventually\n\
@@ -210,7 +206,6 @@ fn coverage_ends_rich_early() {
     assert_eq!(
         stdout(&out),
         "rich\t50.0\t20.8\tsprocket-works\twidgets::rejects_a_bent_cog\n\
-         poor\t100.0\t34.2\tsprocket-works\twidgets::needs_a_lathe\n\
          poor\t100.0\t34.2\tsprocket-works::assembly\tlists_parts\n\
          poor\t100.0\t34.2\tsprocket-works\twidgets::parses_a_sprocket\n\
          poor\t100.0\t34.2\tsprocket-works\twidgets::spins_eventually\n\
