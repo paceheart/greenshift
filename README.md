@@ -13,8 +13,12 @@ greenshift ingest <JUNIT_XML>... [--db PATH] [--commit SHA] [--source NAME]
 ```
 
 Every file given in one invocation is recorded as one run. For example, with
-cargo-nextest's JUnit output turned on (`[profile.default.junit]` in
-`.config/nextest.toml`):
+cargo-nextest's JUnit output turned on in `.config/nextest.toml`:
+
+```toml
+[profile.default.junit]
+path = "junit.xml"
+```
 
 ```
 cargo nextest run
