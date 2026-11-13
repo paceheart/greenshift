@@ -57,7 +57,7 @@ the common `<testsuites>/<testsuite>/<testcase>` shape should work.
 
 ```
 greenshift select [--db PATH] [--source NAME]... [--min-runs N]
-                  [--confidence N] [--estimator empirical|smoothed]
+                  [--confidence N] [--estimator wilson|empirical|smoothed]
 ```
 
 `select` reads the store and writes nothing. It sorts the tests of your
@@ -98,12 +98,15 @@ class	coverage	confidence	suite	name
 - `coverage`: the percentage of rows covered once this test and every line
   before it pass, to one decimal. It reads `100.0` only when no row is left,
   and on every poor line.
-- `confidence`: the estimated chance, as a percentage to one decimal, that
-  the whole suite is green once this test and every line before it pass,
-  from the number of green full runs G and the rows left R. `--estimator
-  empirical` (the default) is G / (G + R), taken as 100% when both are 0;
-  `--estimator smoothed` is (G + 1) / (G + R + 2). Which estimator is the
-  default is not settled yet and may change.
+- `confidence`: an estimate, as a percentage to one decimal, of how likely
+  the whole suite is to be green once this test and every line before it
+  pass, from the number of green full runs G and the rows left R: of the
+  G + R full runs in which those tests passed, G were green. By default
+  (`--estimator wilson`) the estimate is the lower end of the Wilson score
+  interval for that share, with z = 1.96: a cautious figure that stays low
+  while there are few runs to go on, and is 0 when none of them was green.
+  `--estimator empirical` is the plain share G / (G + R), taken as 100%
+  when both are 0, and `--estimator smoothed` is (G + 1) / (G + R + 2).
 - `suite` and `name`: as stored, with control characters, tabs and
   backslashes escaped as in Rust's `{:?}`, so each test is one line.
 

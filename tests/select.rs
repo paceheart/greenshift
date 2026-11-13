@@ -95,15 +95,16 @@ fn selects_from_one_source() {
         .select(&["--source", "nextest", "--min-runs", "4"])
         .success();
     // Rows: run 1 (cog and gearbox), run 3 (gearbox); runs 2 and 4 are
-    // green. The 12 ms cog goes before the 1457 ms gearbox.
+    // green. The 12 ms cog goes before the 1457 ms gearbox. Confidence is
+    // the Wilson lower bound for 2 green of 3 runs, then of 2.
     assert_eq!(
         stdout(&out),
-        "rich\t50.0\t66.7\tsprocket-works\twidgets::rejects_a_bent_cog\n\
-         rich\t100.0\t100.0\tsprocket-works::assembly\tassembles_a_gearbox\n\
-         poor\t100.0\t100.0\tsprocket-works\twidgets::needs_a_lathe\n\
-         poor\t100.0\t100.0\tsprocket-works::assembly\tlists_parts\n\
-         poor\t100.0\t100.0\tsprocket-works\twidgets::parses_a_sprocket\n\
-         poor\t100.0\t100.0\tsprocket-works\twidgets::spins_eventually\n"
+        "rich\t50.0\t20.8\tsprocket-works\twidgets::rejects_a_bent_cog\n\
+         rich\t100.0\t34.2\tsprocket-works::assembly\tassembles_a_gearbox\n\
+         poor\t100.0\t34.2\tsprocket-works\twidgets::needs_a_lathe\n\
+         poor\t100.0\t34.2\tsprocket-works::assembly\tlists_parts\n\
+         poor\t100.0\t34.2\tsprocket-works\twidgets::parses_a_sprocket\n\
+         poor\t100.0\t34.2\tsprocket-works\twidgets::spins_eventually\n"
     );
     assert_eq!(stderr(&out), "");
     assert_eq!(
@@ -122,8 +123,11 @@ fn selects_from_one_source() {
 fn selects_from_every_source_by_default() {
     let h = history();
     // The vaelii run is the newest full run, so its tests are the universe;
-    // it is the only run any of them failed in. fixtures at 0 ms covers it.
-    let out = h.select(&["--min-runs", "1"]).success();
+    // it is the only run any of them failed in. fixtures at 0 ms covers it,
+    // leaving the 4 nextest runs, all green for this universe.
+    let out = h
+        .select(&["--min-runs", "1", "--estimator", "empirical"])
+        .success();
     assert_eq!(
         stdout(&out),
         "rich\t100.0\t100.0\twidgets.flywheel-test\tfixtures\n\
@@ -134,11 +138,12 @@ fn selects_from_every_source_by_default() {
          poor\t100.0\t100.0\twidgets.sprocket-test\trejects-a-bent-cog\n\
          poor\t100.0\t100.0\twidgets.sprocket-test\tspins-under-load\n"
     );
-    // With the default --min-runs of 120, every test here is new.
+    // With the default --min-runs of 120, every test here is new; the
+    // default estimator gives the Wilson lower bound for 4 of 4 green.
     let out = h.select(&[]).success();
     assert_eq!(
         stdout(&out),
-        "rich\t100.0\t100.0\twidgets.flywheel-test\tfixtures\n"
+        "rich\t100.0\t51.0\twidgets.flywheel-test\tfixtures\n"
     );
 }
 
@@ -153,6 +158,8 @@ fn confidence_ends_rich_early() {
             "4",
             "--confidence",
             "60",
+            "--estimator",
+            "empirical",
         ])
         .success();
     assert_eq!(

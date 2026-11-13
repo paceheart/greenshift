@@ -9,7 +9,7 @@ use clap::builder::NonEmptyStringValueParser;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::junit;
-use crate::select::{self, Empirical, Estimator, Smoothed};
+use crate::select::{self, Empirical, Estimator, Smoothed, Wilson};
 use crate::store::{self, NewRun, Store};
 
 /// Pick which tests to run from what your tests have done before.
@@ -73,13 +73,16 @@ pub struct SelectArgs {
     pub confidence: Option<f64>,
 
     /// How confidence is estimated.
-    #[arg(long, value_enum, default_value_t = EstimatorKind::Empirical)]
+    #[arg(long, value_enum, default_value_t = EstimatorKind::Wilson)]
     pub estimator: EstimatorKind,
 }
 
 /// The confidence estimators `select` offers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum EstimatorKind {
+    /// The lower bound of the Wilson score interval (z = 1.96) for the
+    /// share of green runs.
+    Wilson,
     /// green / (green + rows left).
     Empirical,
     /// (green + 1) / (green + rows left + 2).
@@ -89,6 +92,7 @@ pub enum EstimatorKind {
 impl EstimatorKind {
     fn estimator(self) -> &'static dyn Estimator {
         match self {
+            EstimatorKind::Wilson => &Wilson,
             EstimatorKind::Empirical => &Empirical,
             EstimatorKind::Smoothed => &Smoothed,
         }
@@ -236,7 +240,7 @@ mod tests {
         assert_eq!(args.source, Vec::<String>::new());
         assert_eq!(args.min_runs, 120);
         assert_eq!(args.confidence, None);
-        assert_eq!(args.estimator, EstimatorKind::Empirical);
+        assert_eq!(args.estimator, EstimatorKind::Wilson);
     }
 
     #[test]
@@ -261,6 +265,12 @@ mod tests {
         assert_eq!(args.min_runs, 7);
         assert_eq!(args.confidence, Some(99.5));
         assert_eq!(args.estimator, EstimatorKind::Smoothed);
+        for (name, kind) in [
+            ("wilson", EstimatorKind::Wilson),
+            ("empirical", EstimatorKind::Empirical),
+        ] {
+            assert_eq!(select_args(&["--estimator", name]).unwrap().estimator, kind);
+        }
     }
 
     #[test]
