@@ -118,6 +118,10 @@ pub enum StoreError {
     },
     #[error("history store {path} has schema version {found}, which no greenshift writes")]
     BadVersion { path: String, found: i64 },
+    #[error(
+        "{path} is SQLite's special name for a private in-memory database, not a file; pass a real path"
+    )]
+    MemoryPath { path: String },
 }
 
 /// A run about to be recorded.
@@ -150,6 +154,11 @@ impl Store {
     /// Open (creating if needed) the store at `path`, creating its parent
     /// directory, and migrate it to [`SCHEMA_VERSION`].
     pub fn open(path: &Path) -> Result<Store, StoreError> {
+        if path == Path::new(":memory:") {
+            return Err(StoreError::MemoryPath {
+                path: ":memory:".into(),
+            });
+        }
         let shown = path.display().to_string();
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir).map_err(|source| StoreError::CreateDir {

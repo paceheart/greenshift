@@ -261,6 +261,15 @@ fn store_from_a_newer_greenshift_is_refused() {
 }
 
 #[test]
+fn the_special_memory_name_is_refused_as_a_db_path() {
+    // SQLite treats the bare filename ":memory:" as its private in-memory
+    // database even without URI mode. Opening it as if it were a real path
+    // would report success while recording nothing to disk.
+    let err = Store::open(Path::new(":memory:")).unwrap_err();
+    assert!(matches!(err, StoreError::MemoryPath { .. }), "{err:?}");
+}
+
+#[test]
 fn store_with_a_negative_schema_version_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("history.sqlite");
