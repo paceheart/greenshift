@@ -193,6 +193,27 @@ fn an_empty_sqlite_file_becomes_a_store() {
     assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
 }
 
+#[test]
+fn an_empty_sqlite_file_with_a_stray_user_version_becomes_a_store() {
+    // No schema, so it is taken over; its user_version says nothing about
+    // greenshift's schema and must not skip migration 1.
+    for (app_id, user_version) in [(0, 1), (0, SCHEMA_VERSION + 6), (42, 1)] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.sqlite");
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "application_id", app_id).unwrap();
+        conn.pragma_update(None, "user_version", user_version)
+            .unwrap();
+        drop(conn);
+        let mut store = Store::open(&path).unwrap();
+        assert_eq!(application_id(&store), i64::from(APPLICATION_ID));
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        store
+            .record_run(&RUN, &[tc("s", "t", Outcome::Passed, None)])
+            .unwrap();
+    }
+}
+
 /// Make a SQLite file at `path` that some other program owns, and return
 /// its bytes.
 fn foreign_db(path: &Path, application_id: i32) -> Vec<u8> {

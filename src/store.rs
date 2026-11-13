@@ -12,7 +12,8 @@
 //! application_id is anything else (including 0, the SQLite default) is
 //! refused if the file already holds any schema object, so greenshift never
 //! writes into another program's database. A file with no schema at all
-//! (new, or empty) is taken over and migrated.
+//! (new, or empty) is taken over and migrated from version 0, whatever its
+//! `user_version`.
 //!
 //! Schema version 1:
 //!
@@ -214,7 +215,10 @@ impl Store {
         let app_id: i32 = tx
             .pragma_query_value(None, "application_id", |row| row.get(0))
             .map_err(sqlite)?;
-        if app_id != APPLICATION_ID {
+        let found: i64 = if app_id == APPLICATION_ID {
+            tx.pragma_query_value(None, "user_version", |row| row.get(0))
+                .map_err(sqlite)?
+        } else {
             let objects: i64 = tx
                 .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
                 .map_err(sqlite)?;
@@ -225,10 +229,10 @@ impl Store {
                     expected: APPLICATION_ID,
                 });
             }
-        }
-        let found: i64 = tx
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .map_err(sqlite)?;
+            // Taken over: whatever user_version it has is not a greenshift
+            // schema version, so migrate from the start.
+            0
+        };
         if found < 0 {
             return Err(StoreError::BadVersion {
                 path: path.clone(),
