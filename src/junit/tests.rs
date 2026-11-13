@@ -188,7 +188,8 @@ fn classname_wins_over_suite_name() {
 
 #[test]
 fn entities_in_name_and_classname_are_unescaped() {
-    let c = one(r#"<testsuite name="s"><testcase classname="w&amp;b" name="t&#x26;u"/></testsuite>"#);
+    let c =
+        one(r#"<testsuite name="s"><testcase classname="w&amp;b" name="t&#x26;u"/></testsuite>"#);
     assert_eq!(c.suite, "w&b");
     assert_eq!(c.name, "t&u");
 }
