@@ -3,8 +3,8 @@
 greenshift picks which tests to run from what your tests have done before.
 
 It is early. This release records test history from JUnit XML into a
-per-repo SQLite store. Choosing tests from that history (`greenshift select`)
-is next.
+per-repo SQLite store (`greenshift ingest`) and chooses tests from that
+history (`greenshift select`).
 
 ## Ingest
 
@@ -52,6 +52,74 @@ greenshift ingest target/nextest/default/junit.xml \
 
 Known producers: cargo-nextest and vaelii's test runner. Anything that writes
 the common `<testsuites>/<testsuite>/<testcase>` shape should work.
+
+## Select
+
+```
+greenshift select [--db PATH] [--source NAME]... [--min-runs N]
+                  [--confidence N] [--estimator empirical|smoothed]
+```
+
+`select` reads the store and writes nothing. It sorts the tests of your
+latest full run into *rich* tests, which together have caught every failure
+on record, and *poor* tests, which can run after them:
+
+- **Full runs.** Runs are taken oldest first. The first is full; after that
+  a run is full when it has at least 90% as many results as the largest of
+  the three full runs before it. A partial run (say, of only the selected
+  tests) is not full. With `--source`, given once or more, only runs from
+  those sources are read; by default all are.
+- **Universe.** The tests of the newest full run.
+- **Rows.** Every full run in which a universe test failed (`failed` and
+  `error` count alike; `skipped` counts as neither a pass nor a failure).
+  Full runs with no universe failure are *green*.
+- **Rich.** Tests are picked one at a time, highest failure chance per
+  second first: f / (f + p) / median, where f is the test's failures in the
+  rows not yet covered and p its passes in every full run. Ties go to the
+  shorter median, then suite, then name, in byte order. Every row the pick
+  fails in is then covered. Picking stops when no row is left, so the rich
+  tests together fail in every failing full run; a test that fails in no
+  row left is never picked.
+- **Poor.** Every other universe test with at least `--min-runs` results
+  (default 120) of any outcome, in any run read. The rest are *new* and not
+  listed.
+- **Median.** A test's duration is the median of its last 5 results that
+  have one, in any run read; a test with none gets the median of the other
+  tests' medians (1 ms if no test has one). 0 ms counts as 1 ms.
+
+Output is one line per test, rich in pick order, then poor by median, suite
+and name, with five tab-separated columns:
+
+```
+class	coverage	confidence	suite	name
+```
+
+- `class`: `rich` or `poor`.
+- `coverage`: the percentage of rows covered once this test and every line
+  before it pass, to one decimal. It reads `100.0` only when no row is left,
+  and on every poor line.
+- `confidence`: the estimated chance, as a percentage to one decimal, that
+  the whole suite is green once this test and every line before it pass,
+  from the number of green full runs G and the rows left R. `--estimator
+  empirical` (the default) is G / (G + R), taken as 100% when both are 0;
+  `--estimator smoothed` is (G + 1) / (G + R + 2). Which estimator is the
+  default is not settled yet and may change.
+- `suite` and `name`: as stored, with control characters, tabs and
+  backslashes escaped as in Rust's `{:?}`, so each test is one line.
+
+With `--confidence N` (a percentage from 0 to 100), rich ends at the first
+test whose confidence is at least N, and the rest of the picked tests are
+treated like any other non-rich test: poor with enough results, otherwise
+new. If no test reaches N, rich is all the picked tests and stderr says the
+highest confidence reached.
+
+Exit status:
+
+- 0: the selection was printed (possibly nothing, when the universe is
+  empty).
+- 1: an error, such as a `--db` file that is not a greenshift store.
+- 2: no full run from the chosen sources, or no store at all. stderr says
+  `no history: run the full suite` and nothing is printed to stdout.
 
 ## Building
 
