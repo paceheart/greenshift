@@ -300,8 +300,8 @@ pub(crate) fn escape_file_text(text: &str) -> String {
 
 /// Text read from an input file, which may hold terminal control bytes.
 ///
-/// `Display` writes it escaped, as [`escape_file_text`] does: control and
-/// invisible characters and backslash as `{:?}` would show them (an ESC
+/// `Display` writes it escaped: control and invisible characters and
+/// backslash as `{:?}` would show them (an ESC
 /// prints as `\u{1b}`), quotes left alone. `Debug` escapes too. There is no
 /// `Deref<Target = str>` or `AsRef<str>`, so it cannot be passed where a
 /// `&str` is expected and printed raw by accident:
