@@ -226,6 +226,26 @@ fn time_in_fractional_seconds_rounds_to_nearest_ms() {
 }
 
 #[test]
+fn seconds_to_ms_rejects_the_value_that_rounds_up_to_two_to_the_63() {
+    // i64::MAX is not exactly representable in f64; the nearest f64 is
+    // 2**63, one past the real max. A `ms` of exactly that value must still
+    // be rejected, not saturate-cast to i64::MAX.
+    let boundary = i64::MAX as f64;
+    let secs = boundary / 1000.0;
+    assert_eq!(
+        (secs * 1000.0).round(),
+        boundary,
+        "test's own arithmetic must land exactly on the boundary"
+    );
+    let text = format!("{secs}");
+    let err = parse_str(&format!(
+        r#"<testsuite name="s"><testcase name="t" time="{text}"/></testsuite>"#
+    ))
+    .unwrap_err();
+    assert!(matches!(err, JunitError::BadTime { .. }), "{err:?}");
+}
+
+#[test]
 fn bad_time_is_an_error_naming_the_test() {
     for time in ["fast", "-1", "NaN", "inf"] {
         let err = parse_str(&format!(

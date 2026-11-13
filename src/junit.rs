@@ -311,8 +311,11 @@ fn seconds_to_ms(text: &str) -> Option<i64> {
         return None;
     }
     let ms = (secs * 1000.0).round();
-    // An i64 holds ~292 million years of milliseconds; anything past that is junk.
-    (ms <= i64::MAX as f64).then_some(ms as i64)
+    // An i64 holds ~292 million years of milliseconds; anything past that is
+    // junk. `i64::MAX` is not exactly representable in f64 and rounds up to
+    // 2**63, so this must be a strict `<` or `ms == 2**63` would pass the
+    // check and then saturate on the cast below instead of being rejected.
+    (ms < i64::MAX as f64).then_some(ms as i64)
 }
 
 /// An attribute's unescaped value, if present.
