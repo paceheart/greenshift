@@ -62,18 +62,12 @@ pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
         let report = junit::parse_file(file).with_context(|| format!("{}", file.display()))?;
         cases.extend(report.cases);
     }
-    let file_name = args
-        .files
-        .iter()
-        .map(|f| f.display().to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
     let mut store = Store::open(&args.db)?;
     let recorded = store.record_run(
         &NewRun {
             commit: args.commit.as_deref(),
             source: &args.source,
-            file_name: &file_name,
+            files: &args.files,
         },
         &cases,
     )?;

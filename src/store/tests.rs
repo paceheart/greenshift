@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use super::*;
 
 fn tc(suite: &str, name: &str, outcome: Outcome, ms: Option<i64>) -> TestCase {
@@ -12,8 +14,20 @@ fn tc(suite: &str, name: &str, outcome: Outcome, ms: Option<i64>) -> TestCase {
 const RUN: NewRun<'static> = NewRun {
     commit: Some("0123abcd"),
     source: "nextest",
-    file_name: "target/nextest/default/junit.xml",
+    files: &[],
 };
+
+/// The paths recorded for a run, in order, as stored.
+fn run_files(store: &Store, run_id: i64) -> Vec<(i64, Vec<u8>)> {
+    let mut stmt = store
+        .conn
+        .prepare("SELECT position, path FROM run_files WHERE run_id = ?1 ORDER BY position")
+        .unwrap();
+    stmt.query_map([run_id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
 
 type Row = (String, String, String, Option<i64>);
 
@@ -69,7 +83,28 @@ fn schema_has_runs_tests_and_results() {
             &store,
             "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name"
         ),
-        ["results", "runs", "tests"]
+        ["results", "run_files", "runs", "tests"]
+    );
+    assert_eq!(
+        strings(
+            &store,
+            "SELECT name FROM pragma_table_info('runs') ORDER BY cid"
+        ),
+        ["id", "commit_sha", "source", "ingested_at"]
+    );
+    assert_eq!(
+        strings(
+            &store,
+            "SELECT name FROM pragma_table_info('run_files') ORDER BY cid"
+        ),
+        ["run_id", "position", "path"]
+    );
+    assert_eq!(
+        strings(
+            &store,
+            "SELECT name FROM pragma_table_info('run_files') WHERE pk > 0 ORDER BY pk"
+        ),
+        ["run_id", "position"]
     );
     assert_eq!(
         strings(
@@ -229,21 +264,29 @@ fn record_run_writes_one_run_and_every_result() {
         tc("widgets", "spins", Outcome::Error, None),
         tc("gears", "needs_a_lathe", Outcome::Skipped, Some(0)),
     ];
-    let recorded = store.record_run(&RUN, &cases).unwrap();
+    let files = [PathBuf::from("target/nextest/default/junit.xml")];
+    let run = NewRun {
+        files: &files,
+        ..RUN
+    };
+    let recorded = store.record_run(&run, &cases).unwrap();
     assert_eq!(recorded.results, 4);
 
-    let (commit, source, file, at): (Option<String>, String, String, String) = store
+    let (commit, source, at): (Option<String>, String, String) = store
         .conn
         .query_row(
-            "SELECT commit_sha, source, file_name, ingested_at FROM runs WHERE id = ?1",
+            "SELECT commit_sha, source, ingested_at FROM runs WHERE id = ?1",
             [recorded.run_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap();
     assert_eq!(commit.as_deref(), Some("0123abcd"));
     assert_eq!(source, "nextest");
-    assert_eq!(file, "target/nextest/default/junit.xml");
     assert!(at.ends_with('Z') && at.contains('T'), "{at}");
+    assert_eq!(
+        run_files(&store, recorded.run_id),
+        [(0, b"target/nextest/default/junit.xml".to_vec())]
+    );
 
     assert_eq!(
         rows(&store, recorded.run_id),
@@ -254,6 +297,67 @@ fn record_run_writes_one_run_and_every_result() {
             row("widgets", "spins", "error", None),
         ]
     );
+}
+
+#[test]
+fn every_file_of_a_run_is_recorded_in_order() {
+    let mut store = Store::open_in_memory().unwrap();
+    // A newline is legal in a file name; it no longer collides with a
+    // separator.
+    let files = [
+        PathBuf::from("b.xml"),
+        PathBuf::from("dir/a\nb.xml"),
+        PathBuf::from("a.xml"),
+    ];
+    let run = NewRun {
+        files: &files,
+        ..RUN
+    };
+    let id = store.record_run(&run, &[]).unwrap().run_id;
+    assert_eq!(
+        run_files(&store, id),
+        [
+            (0, b"b.xml".to_vec()),
+            (1, b"dir/a\nb.xml".to_vec()),
+            (2, b"a.xml".to_vec()),
+        ]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_path_is_recorded_byte_for_byte() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let mut store = Store::open_in_memory().unwrap();
+    let raw = b"results/\xff\xfe-junit.xml";
+    let files = [PathBuf::from(OsStr::from_bytes(raw))];
+    let run = NewRun {
+        files: &files,
+        ..RUN
+    };
+    let id = store.record_run(&run, &[]).unwrap().run_id;
+    assert_eq!(run_files(&store, id), [(0, raw.to_vec())]);
+}
+
+#[test]
+fn deleting_a_run_deletes_its_files_and_results() {
+    let mut store = Store::open_in_memory().unwrap();
+    let files = [PathBuf::from("a.xml"), PathBuf::from("b.xml")];
+    let run = NewRun {
+        files: &files,
+        ..RUN
+    };
+    let id = store
+        .record_run(&run, &[tc("s", "t", Outcome::Passed, None)])
+        .unwrap()
+        .run_id;
+    store
+        .conn
+        .execute("DELETE FROM runs WHERE id = ?1", [id])
+        .unwrap();
+    assert_eq!(count(&store, "run_files"), 0);
+    assert_eq!(count(&store, "results"), 0);
 }
 
 #[test]
@@ -363,11 +467,17 @@ fn a_failed_insert_writes_nothing() {
         tc("s", "fine", Outcome::Passed, None),
         tc("s", "poison", Outcome::Passed, None),
     ];
-    let err = store.record_run(&RUN, &cases).unwrap_err();
+    let files = [PathBuf::from("a.xml")];
+    let run = NewRun {
+        files: &files,
+        ..RUN
+    };
+    let err = store.record_run(&run, &cases).unwrap_err();
     let cause = std::error::Error::source(&err).expect("sqlite error is the source");
     assert!(cause.to_string().contains("poisoned"), "{cause}");
     assert!(!err.to_string().contains("poisoned"), "{err}");
     assert_eq!(count(&store, "runs"), 0);
+    assert_eq!(count(&store, "run_files"), 0);
     assert_eq!(count(&store, "tests"), 0);
     assert_eq!(count(&store, "results"), 0);
 }
@@ -378,7 +488,7 @@ fn schema_rejects_an_unknown_outcome_and_dangling_ids() {
     store
         .conn
         .execute_batch(
-            "INSERT INTO runs (id, source, file_name) VALUES (1, 'x', 'y');
+            "INSERT INTO runs (id, source) VALUES (1, 'x');
              INSERT INTO tests (id, suite, name) VALUES (1, 's', 't');",
         )
         .unwrap();

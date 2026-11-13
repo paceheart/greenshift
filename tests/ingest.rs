@@ -57,21 +57,29 @@ fn both_producers_in_one_invocation_make_one_run() {
     assert_eq!(count(&conn, "tests"), 13);
     assert_eq!(count(&conn, "results"), 13);
 
-    let (commit, source, file_name, version): (Option<String>, String, String, i64) = conn
+    let (commit, source, version): (Option<String>, String, i64) = conn
         .query_row(
-            "SELECT commit_sha, source, file_name, (SELECT user_version FROM pragma_user_version)
+            "SELECT commit_sha, source, (SELECT user_version FROM pragma_user_version)
              FROM runs",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap();
     assert_eq!(commit.as_deref(), Some("0123abcd"));
     assert_eq!(source, "ci");
-    assert_eq!(
-        file_name,
-        format!("{}\n{}", files[0].display(), files[1].display())
-    );
     assert_eq!(version, 1);
+    let recorded: Vec<Vec<u8>> = conn
+        .prepare("SELECT path FROM run_files ORDER BY position")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let given: Vec<Vec<u8>> = files
+        .iter()
+        .map(|f| f.as_os_str().as_encoded_bytes().to_vec())
+        .collect();
+    assert_eq!(recorded, given);
 
     let outcomes: Vec<(String, i64)> = conn
         .prepare("SELECT outcome, count(*) FROM results GROUP BY outcome ORDER BY outcome")

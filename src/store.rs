@@ -17,12 +17,17 @@
 //! Schema version 1:
 //!
 //! - `runs`: one row per `greenshift ingest` invocation.
+//! - `run_files`: the JUnit files a run came from, one row each, numbered
+//!   from 0 in the order given. `path` is the path exactly as given, as raw
+//!   bytes: on Unix the `OsStr` bytes, so non-UTF-8 names and names with
+//!   newlines survive unchanged; elsewhere `OsStr::as_encoded_bytes`
+//!   (WTF-8 on Windows), which round-trips on the same platform.
 //! - `tests`: one row per test identity (`suite`, `name`), shared by every
 //!   run, so the strings are stored once.
 //! - `results`: one row per test per run: outcome and duration.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
@@ -44,9 +49,15 @@ const MIGRATIONS: &[&str] = &[
         id          INTEGER PRIMARY KEY,
         commit_sha  TEXT,
         source      TEXT NOT NULL,
-        ingested_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-        file_name   TEXT NOT NULL
+        ingested_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     ) STRICT;
+
+    CREATE TABLE run_files (
+        run_id   INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL CHECK (position >= 0),
+        path     BLOB NOT NULL,
+        PRIMARY KEY (run_id, position)
+    ) STRICT, WITHOUT ROWID;
 
     CREATE TABLE tests (
         id    INTEGER PRIMARY KEY,
@@ -113,8 +124,8 @@ pub struct NewRun<'a> {
     pub commit: Option<&'a str>,
     /// Which producer or CI job the results came from.
     pub source: &'a str,
-    /// The JUnit file(s) the results came from, newline-separated.
-    pub file_name: &'a str,
+    /// The JUnit files the results came from, in the order given.
+    pub files: &'a [PathBuf],
 }
 
 /// What [`Store::record_run`] wrote.
@@ -259,11 +270,21 @@ impl Store {
         };
         let tx = self.conn.transaction().map_err(sqlite)?;
         tx.execute(
-            "INSERT INTO runs (commit_sha, source, file_name) VALUES (?1, ?2, ?3)",
-            params![run.commit, run.source, run.file_name],
+            "INSERT INTO runs (commit_sha, source) VALUES (?1, ?2)",
+            params![run.commit, run.source],
         )
         .map_err(sqlite)?;
         let run_id = tx.last_insert_rowid();
+        {
+            let mut add_file = tx
+                .prepare("INSERT INTO run_files (run_id, position, path) VALUES (?1, ?2, ?3)")
+                .map_err(sqlite)?;
+            for (position, file) in run.files.iter().enumerate() {
+                add_file
+                    .execute(params![run_id, position as i64, path_bytes(file)])
+                    .map_err(sqlite)?;
+            }
+        }
         {
             let mut find_test = tx
                 .prepare("SELECT id FROM tests WHERE suite = ?1 AND name = ?2")
@@ -297,6 +318,19 @@ impl Store {
             results: merged.len(),
         })
     }
+}
+
+/// The bytes stored in `run_files.path`; see the module docs.
+#[cfg(unix)]
+fn path_bytes(path: &Path) -> &[u8] {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes()
+}
+
+/// The bytes stored in `run_files.path`; see the module docs.
+#[cfg(not(unix))]
+fn path_bytes(path: &Path) -> &[u8] {
+    path.as_os_str().as_encoded_bytes()
 }
 
 /// How much an outcome says about the test; the higher one wins when a test
