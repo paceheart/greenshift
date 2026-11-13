@@ -179,10 +179,7 @@ pub fn select(args: &SelectArgs) -> anyhow::Result<ExitCode> {
     }
     out.flush()?;
     for missed in decided.unreached {
-        eprintln!(
-            "greenshift: {} {}% not reached; the highest is {:.1}%",
-            missed.measure, missed.wanted, missed.highest
-        );
+        eprintln!("greenshift: {missed}");
     }
     Ok(ExitCode::SUCCESS)
 }

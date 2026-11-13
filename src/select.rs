@@ -388,6 +388,29 @@ pub struct Unreached {
     pub highest: f64,
 }
 
+impl fmt::Display for Unreached {
+    /// `<measure> <wanted>% not reached; the highest is <highest>%`, the
+    /// highest to one decimal, or to as many more as it takes to show it
+    /// below the threshold.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {}% not reached; the highest is ",
+            self.measure, self.wanted
+        )?;
+        let below = |d: usize| {
+            format!("{:.d$}", self.highest)
+                .parse::<f64>()
+                .is_ok_and(|shown| shown < self.wanted)
+        };
+        match (1..=6).find(|&d| below(d)) {
+            Some(d) => write!(f, "{:.d$}%", self.highest),
+            // Shortest exact form, which is below the threshold.
+            None => write!(f, "{}%", self.highest),
+        }
+    }
+}
+
 /// How much of the cover is rich.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Split {

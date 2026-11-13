@@ -639,6 +639,37 @@ fn split_that_never_reaches_the_coverage_is_the_whole_cover() {
 }
 
 #[test]
+fn an_unreached_threshold_never_shows_its_highest_at_or_over_it() {
+    let missed = |wanted, highest| {
+        Unreached {
+            measure: Measure::Confidence,
+            wanted,
+            highest,
+        }
+        .to_string()
+    };
+    assert_eq!(
+        missed(99.0, 75.0),
+        "confidence 99% not reached; the highest is 75.0%"
+    );
+    // One green full run: the Wilson bound is 1 / (1 + 1.96²), which
+    // rounds up to 20.7.
+    let highest = 100.0 * Wilson.p_green(1, 0);
+    assert_eq!(
+        missed(20.66, highest),
+        "confidence 20.66% not reached; the highest is 20.65%"
+    );
+    assert_eq!(
+        missed(99.9, 99.86),
+        "confidence 99.9% not reached; the highest is 99.86%"
+    );
+    assert_eq!(
+        missed(50.0, 49.999_999_9),
+        "confidence 50% not reached; the highest is 49.9999999%"
+    );
+}
+
+#[test]
 fn an_empty_cover_has_nothing_to_split() {
     for thresholds in [DEFAULT, coverage(50.0), confidence(99.0), both(1.0, 1.0)] {
         assert_eq!(
