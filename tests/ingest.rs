@@ -126,6 +126,21 @@ fn commit_is_optional_and_source_defaults() {
 }
 
 #[test]
+fn a_single_test_is_reported_in_the_singular() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("history.sqlite");
+    let one = dir.path().join("one.xml");
+    std::fs::write(
+        &one,
+        r#"<testsuite name="s"><testcase name="t"/></testsuite>"#,
+    )
+    .unwrap();
+    ingest(&db, &[one], &[])
+        .success()
+        .stdout(predicate::str::contains("with 1 test from 1 file into"));
+}
+
+#[test]
 fn default_db_is_created_under_dot_greenshift() {
     let dir = tempfile::tempdir().unwrap();
     greenshift()

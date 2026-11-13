@@ -77,12 +77,14 @@ pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
         },
         &cases,
     )?;
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
     println!(
-        "greenshift: recorded run {} with {} tests from {} file{} into {}",
+        "greenshift: recorded run {} with {} test{} from {} file{} into {}",
         recorded.run_id,
         recorded.results,
+        plural(recorded.results),
         args.files.len(),
-        if args.files.len() == 1 { "" } else { "s" },
+        plural(args.files.len()),
         args.db.display()
     );
     Ok(())
