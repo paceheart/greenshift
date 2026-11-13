@@ -82,6 +82,8 @@ pub enum StoreError {
         found: i64,
         supported: i64,
     },
+    #[error("history store {path} has schema version {found}, which no greenshift writes")]
+    BadVersion { path: String, found: i64 },
 }
 
 /// A run about to be recorded.
@@ -181,6 +183,12 @@ impl Store {
         let found: i64 = tx
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(sqlite)?;
+        if found < 0 {
+            return Err(StoreError::BadVersion {
+                path: path.clone(),
+                found,
+            });
+        }
         if found > SCHEMA_VERSION {
             return Err(StoreError::TooNew {
                 path: path.clone(),

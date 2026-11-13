@@ -141,6 +141,20 @@ fn store_from_a_newer_greenshift_is_refused() {
 }
 
 #[test]
+fn store_with_a_negative_schema_version_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.sqlite");
+    let conn = Connection::open(&path).unwrap();
+    conn.pragma_update(None, "user_version", -1).unwrap();
+    drop(conn);
+    let err = Store::open(&path).unwrap_err();
+    assert!(
+        matches!(err, StoreError::BadVersion { found: -1, .. }),
+        "{err:?}"
+    );
+}
+
+#[test]
 fn record_run_writes_one_run_and_every_result() {
     let mut store = Store::open_in_memory().unwrap();
     let cases = [
