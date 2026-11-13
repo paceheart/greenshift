@@ -360,11 +360,24 @@ fn not_utf8_file_is_an_error() {
 fn missing_file_is_an_io_error_carrying_the_path() {
     let err = parse_file(Path::new("/nonexistent/greenshift/junit.xml")).unwrap_err();
     assert!(
-        matches!(err, JunitError::Io { ref path, .. } if path == "/nonexistent/greenshift/junit.xml"),
+        matches!(err, JunitError::Io { ref path, .. } if path == Path::new("/nonexistent/greenshift/junit.xml")),
         "{err:?}"
     );
     let cause = std::error::Error::source(&err).expect("io error is the source");
     assert!(cause.to_string().contains("No such file"), "{cause}");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_io_error_keeps_a_non_utf8_path_exactly() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let missing = Path::new(OsStr::from_bytes(b"/nonexistent/greenshift/\xff.xml"));
+    let err = parse_file(missing).unwrap_err();
+    assert!(
+        matches!(err, JunitError::Io { ref path, .. } if path == missing),
+        "{err:?}"
+    );
 }
 
 #[test]

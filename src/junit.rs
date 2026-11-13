@@ -19,7 +19,7 @@
 //! innermost enclosing `<testsuite>`.
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
@@ -74,7 +74,7 @@ pub enum JunitError {
     /// `path` is not in the message: callers say which file they were reading.
     #[error("could not read file")]
     Io {
-        path: String,
+        path: PathBuf,
         #[source]
         source: std::io::Error,
     },
@@ -105,7 +105,7 @@ pub enum JunitError {
 /// Read and parse a JUnit XML file.
 pub fn parse_file(path: &Path) -> Result<Report, JunitError> {
     let bytes = std::fs::read(path).map_err(|source| JunitError::Io {
-        path: path.display().to_string(),
+        path: path.to_path_buf(),
         source,
     })?;
     let text = String::from_utf8(bytes).map_err(|_| JunitError::NotUtf8)?;
