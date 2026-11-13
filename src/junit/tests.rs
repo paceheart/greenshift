@@ -598,29 +598,54 @@ fn attribute_and_reference_errors_report_where_they_are() {
     // an error that reports byte 0 (or anything else) is caught.
     let head = "<testsuite name=\"s\">\n<testcase name=\"a\"/>\n";
     let at = head.len() as u64;
-    for (bad, starts_at) in [
-        (r#"<testcase name="t" name="u"/>"#, at),
-        (r#"<testcase name="t" foo/>"#, at),
-        (r#"<testcase name=t/>"#, at),
-        (r#"<testcase name="t&bogus;"/>"#, at),
+    // Each AttrError variant gets its own fixed message: quick-xml's text
+    // counts positions from the tag, which would read as a second, wrong
+    // file offset.
+    for (bad, starts_at, message) in [
+        (
+            r#"<testcase name="t" name="u"/>"#,
+            at,
+            "duplicated attribute",
+        ),
+        (
+            r#"<testcase name="t" foo/>"#,
+            at,
+            "attribute key must be directly followed by `=` or space",
+        ),
+        (
+            r#"<testcase name=/>"#,
+            at,
+            "`=` must be followed by an attribute value",
+        ),
+        (
+            r#"<testcase name=t/>"#,
+            at,
+            "attribute value must be enclosed in `\"` or `'`",
+        ),
+        // The `"` in the key balances for the tag scanner, leaving `'` open.
+        (
+            r#"<testcase b"=' c="d/>'>"#,
+            at,
+            "missing closing quote `'` in attribute value",
+        ),
+        (
+            r#"<testcase name="t&bogus;"/>"#,
+            at,
+            "unrecognized entity \"bogus\"",
+        ),
         // The reference itself starts after `<testcase name="t"><failure>`.
         (
             r#"<testcase name="t"><failure>&bogus;</failure></testcase>"#,
             at + r#"<testcase name="t"><failure>"#.len() as u64,
+            "unrecognized entity \"bogus\"",
         ),
     ] {
         let xml = format!("{head}{bad}</testsuite>");
         let err = parse_str(&xml).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                JunitError::Xml { position, .. } | JunitError::UnknownEntity { position, .. }
-                    if position == starts_at
-            ),
+        assert_eq!(
+            err.to_string(),
+            format!("malformed XML at byte {starts_at}: {message}"),
             "{bad}: {err:?}"
         );
-        // quick-xml counts attribute error positions from the tag, which
-        // would read as a second, wrong file offset.
-        assert!(!err.to_string().contains("position"), "{bad}: {err}");
     }
 }
