@@ -6,6 +6,50 @@ fn pct(p: f64) -> String {
 }
 
 #[test]
+fn wilson_with_every_run_green() {
+    // R = 0: n green runs and no row left.
+    for (n, want) in [
+        (1, "20.7"),
+        (5, "56.6"),
+        (10, "72.2"),
+        (20, "83.9"),
+        (50, "92.9"),
+        (100, "96.3"),
+        (200, "98.1"),
+    ] {
+        assert_eq!(pct(Wilson.p_green(n, 0)), want, "n = {n}");
+    }
+}
+
+#[test]
+fn wilson_with_three_rows_left() {
+    // R = 3 of n runs, G = n - 3.
+    for (n, want) in [
+        (5, "11.8"),
+        (10, "39.7"),
+        (20, "64.0"),
+        (50, "83.8"),
+        (100, "91.5"),
+        (200, "95.7"),
+    ] {
+        assert_eq!(pct(Wilson.p_green(n - 3, 3)), want, "n = {n}");
+    }
+}
+
+#[test]
+fn wilson_with_no_green_run_is_zero() {
+    assert_eq!(Wilson.p_green(0, 4), 0.0);
+    assert_eq!(Wilson.p_green(0, 0), 0.0);
+}
+
+#[test]
+fn wilson_at_all_rows_left_and_at_none() {
+    // 3 green runs, 1 matrix row: from n = 4 with a red to n = 3 all green.
+    assert_eq!(pct(Wilson.p_green(3, 1)), "30.1");
+    assert_eq!(pct(Wilson.p_green(3, 0)), "43.8");
+}
+
+#[test]
 fn empirical_at_all_rows_left_and_at_none() {
     // 3 green runs, 1 matrix row.
     assert_eq!(Empirical.p_green(3, 1), 0.75);

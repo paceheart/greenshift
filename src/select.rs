@@ -31,6 +31,38 @@ pub trait Estimator {
     fn p_green(&self, green: u64, rows_left: u64) -> f64;
 }
 
+/// The lower bound of the Wilson score interval for the share of green runs
+/// among the `n = green + rows_left` runs in which the tests so far passed,
+/// with `z` = [`Wilson::Z`]:
+///
+/// ```text
+/// p = green / n
+/// (p + z²/2n − z·sqrt(p(1 − p)/n + z²/4n²)) / (1 + z²/n)
+/// ```
+///
+/// It is 0 when no such run was green, including when there is no such
+/// run at all.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Wilson;
+
+impl Wilson {
+    /// The normal quantile for a two-sided 95% interval.
+    pub const Z: f64 = 1.96;
+}
+
+impl Estimator for Wilson {
+    fn p_green(&self, green: u64, rows_left: u64) -> f64 {
+        if green == 0 {
+            return 0.0;
+        }
+        let n = (green + rows_left) as f64;
+        let p = green as f64 / n;
+        let z2 = Self::Z * Self::Z;
+        let spread = Self::Z * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt();
+        (p + z2 / (2.0 * n) - spread) / (1.0 + z2 / n)
+    }
+}
+
 /// `green / (green + rows_left)`: the share of history runs in which the
 /// tests so far passed that were green. With no such run at all (no green
 /// run and no row left) nothing in history contradicts a green suite, so
