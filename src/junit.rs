@@ -90,6 +90,8 @@ pub enum JunitError {
     Empty,
     #[error("malformed XML: unexpected end of document")]
     Truncated,
+    #[error("malformed XML at byte {position}: content outside the root element")]
+    OutsideRoot { position: u64 },
     #[error("malformed JUnit at byte {position}: <testcase> without a name attribute")]
     MissingName { position: u64 },
     #[error("malformed JUnit at byte {position}: <testcase name=\"{name}\"> has time=\"{time}\", expected seconds")]
@@ -177,6 +179,9 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
                 let empty = matches!(event, Event::Empty(_));
                 let tag = e.local_name();
                 let tag = tag.as_ref();
+                if seen_root && depth == 0 {
+                    return Err(JunitError::OutsideRoot { position });
+                }
                 if !seen_root {
                     seen_root = true;
                     if tag != b"testsuites" && tag != b"testsuite" {
@@ -225,8 +230,17 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
                 depth = depth.saturating_sub(1);
             }
             Event::GeneralRef(r) => {
+                if depth == 0 {
+                    return Err(JunitError::OutsideRoot { position });
+                }
                 // Text is not kept, but an undefined entity is still malformed XML.
                 check_ref(&r).map_err(|e| xml_err(&reader, e))?;
+            }
+            Event::Text(t) if depth == 0 && !t.iter().all(u8::is_ascii_whitespace) => {
+                return Err(JunitError::OutsideRoot { position });
+            }
+            Event::CData(_) if depth == 0 => {
+                return Err(JunitError::OutsideRoot { position });
             }
             Event::Eof => {
                 if !seen_root {

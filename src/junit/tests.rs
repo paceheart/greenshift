@@ -391,3 +391,28 @@ fn outcome_text() {
     let text: Vec<_> = all.iter().map(|o| o.to_string()).collect();
     assert_eq!(text, ["passed", "failed", "error", "skipped"]);
 }
+
+#[test]
+fn content_outside_the_root_element_is_an_error() {
+    for xml in [
+        r#"<testsuites/><testcase name="x"/>"#,
+        r#"<testsuites/><html/>"#,
+        r#"<testsuite name="a"><testcase name="x"/></testsuite><testsuite name="b"><testcase name="y"/></testsuite>"#,
+        r#"junk<testsuite name="s"><testcase name="t"/></testsuite>"#,
+        r#"<testsuite name="s"><testcase name="t"/></testsuite>junk"#,
+        r#"<testsuite name="s"/>&amp;"#,
+        r#"<testsuite name="s"/><![CDATA[x]]>"#,
+    ] {
+        let err = parse_str(xml).unwrap_err();
+        assert!(
+            matches!(err, JunitError::OutsideRoot { .. }),
+            "{xml}: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn whitespace_comments_and_a_bom_around_the_root_are_fine() {
+    let c = one("\u{feff}<?xml version=\"1.0\"?>\n<!-- c -->\n<testsuite name=\"s\"><testcase name=\"t\"/></testsuite>\n<!-- c -->\n");
+    assert_eq!(c.name, "t");
+}
