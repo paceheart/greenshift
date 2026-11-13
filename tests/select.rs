@@ -298,7 +298,7 @@ fn a_file_that_is_not_a_store_is_an_error() {
         .assert()
         .code(1);
     assert!(
-        stderr(&out).contains("not a greenshift history store"),
+        stderr(&out).contains("not a greenshift history store") && !stderr(&out).contains("write"),
         "{}",
         stderr(&out)
     );

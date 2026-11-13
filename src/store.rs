@@ -112,7 +112,7 @@ pub enum StoreError {
         supported: i64,
     },
     #[error(
-        "{path} is not a greenshift history store (SQLite application_id {found}, expected {expected}); refusing to write to it"
+        "{path} is not a greenshift history store (SQLite application_id {found}, expected {expected}); refusing to use it"
     )]
     NotAStore {
         path: String,
