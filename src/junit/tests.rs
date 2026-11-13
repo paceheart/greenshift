@@ -402,6 +402,12 @@ fn content_outside_the_root_element_is_an_error() {
         r#"<testsuite name="s"><testcase name="t"/></testsuite>junk"#,
         r#"<testsuite name="s"/>&amp;"#,
         r#"<testsuite name="s"/><![CDATA[x]]>"#,
+        // A second XML declaration or a doctype after the root belongs to
+        // the prolog, not the epilog, and is just as misplaced as a second
+        // root or trailing text: this is what a careless concatenation of
+        // two complete documents leaves behind when only one root survives.
+        r#"<testsuite name="s"/><?xml version="1.0"?>"#,
+        r#"<testsuite name="s"/><!DOCTYPE foo>"#,
     ] {
         let err = parse_str(xml).unwrap_err();
         assert!(
@@ -414,5 +420,13 @@ fn content_outside_the_root_element_is_an_error() {
 #[test]
 fn whitespace_comments_and_a_bom_around_the_root_are_fine() {
     let c = one("\u{feff}<?xml version=\"1.0\"?>\n<!-- c -->\n<testsuite name=\"s\"><testcase name=\"t\"/></testsuite>\n<!-- c -->\n");
+    assert_eq!(c.name, "t");
+}
+
+#[test]
+fn a_processing_instruction_after_the_root_is_fine() {
+    // Unlike a declaration or a doctype, a PI is legal XML epilog content
+    // (same grammar slot as a trailing comment), so it must stay accepted.
+    let c = one(r#"<testsuite name="s"><testcase name="t"/></testsuite><?some-pi data?>"#);
     assert_eq!(c.name, "t");
 }

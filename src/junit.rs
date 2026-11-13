@@ -242,6 +242,13 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
             Event::CData(_) if depth == 0 => {
                 return Err(JunitError::OutsideRoot { position });
             }
+            // An XML declaration or doctype is only legal in the prolog,
+            // before the root starts; a PI or comment there (or in the
+            // epilog, after the root ends) is ordinary XML and stays ignored
+            // below.
+            Event::Decl(_) | Event::DocType(_) if seen_root && depth == 0 => {
+                return Err(JunitError::OutsideRoot { position });
+            }
             Event::Eof => {
                 if !seen_root {
                     return Err(JunitError::Empty);
