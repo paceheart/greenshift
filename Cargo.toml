@@ -13,11 +13,13 @@ categories = ["command-line-utilities", "development-tools::testing"]
 anyhow = "1.0.98"
 clap = { version = "4.5.58", features = ["derive"] }
 quick-xml = "0.38"
+rusqlite = { version = "0.40", features = ["bundled"] }
 thiserror = "2"
 
 [dev-dependencies]
 assert_cmd = "2.1.2"
 predicates = "3.1.3"
+tempfile = "3"
 
 [profile.release]
 lto = true
