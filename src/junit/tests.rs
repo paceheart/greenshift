@@ -417,6 +417,30 @@ fn an_io_error_keeps_a_non_utf8_path_exactly() {
 }
 
 #[test]
+fn wrong_root_error_escapes_control_bytes_in_the_tag_name() {
+    // The tag name comes straight from the input file: a crafted root
+    // element name must not be able to put a raw control byte (e.g. an
+    // ANSI escape) into the error text printed to the user's terminal.
+    let err = JunitError::WrongRoot("\u{1b}[31mevil".to_string());
+    let text = err.to_string();
+    assert!(!text.contains('\u{1b}'), "{text:?}");
+    assert!(text.contains("evil"), "{text:?}");
+}
+
+#[test]
+fn bad_time_error_escapes_control_bytes_in_name_and_time() {
+    let err = JunitError::BadTime {
+        position: 0,
+        name: "\u{1b}[31msprocket".to_string(),
+        time: "\u{1b}[31mbad".to_string(),
+    };
+    let text = err.to_string();
+    assert!(!text.contains('\u{1b}'), "{text:?}");
+    assert!(text.contains("sprocket"), "{text:?}");
+    assert!(text.contains("bad"), "{text:?}");
+}
+
+#[test]
 fn xml_error_message_does_not_repeat_itself() {
     let err = parse_str(MALFORMED).unwrap_err();
     let text = err.to_string();

@@ -84,7 +84,7 @@ pub enum JunitError {
     // source(), so keep the text rather than chaining it.
     #[error("malformed XML at byte {position}: {message}")]
     Xml { position: u64, message: String },
-    #[error("not JUnit XML: root element is <{0}>, expected <testsuites> or <testsuite>")]
+    #[error("not JUnit XML: root element is {0:?}, expected <testsuites> or <testsuite>")]
     WrongRoot(String),
     #[error("not JUnit XML: no root element")]
     Empty,
@@ -94,7 +94,7 @@ pub enum JunitError {
     OutsideRoot { position: u64 },
     #[error("malformed JUnit at byte {position}: <testcase> without a name attribute")]
     MissingName { position: u64 },
-    #[error("malformed JUnit at byte {position}: <testcase name=\"{name}\"> has time=\"{time}\", expected seconds")]
+    #[error("malformed JUnit at byte {position}: <testcase name={name:?}> has time={time:?}, expected seconds")]
     BadTime {
         position: u64,
         name: String,
