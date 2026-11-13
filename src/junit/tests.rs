@@ -301,6 +301,35 @@ fn failure_nested_deeper_than_a_direct_child_is_ignored() {
 }
 
 #[test]
+fn suite_is_empty_without_classname_or_suite_name() {
+    for xml in [
+        r#"<testsuites><testcase name="t"/></testsuites>"#,
+        r#"<testsuite><testcase name="t"/></testsuite>"#,
+    ] {
+        assert_eq!(one(xml).suite, "", "{xml}");
+    }
+}
+
+#[test]
+fn a_testcase_nested_in_a_testcase_is_ignored() {
+    // README: anything inside a <testcase> other than which outcome children
+    // it has is ignored, nested testcases included, even one without a name.
+    for inner in [
+        r#"<testcase name="inner"><failure/></testcase>"#,
+        "<testcase/>",
+    ] {
+        let c = one(&format!(
+            r#"<testsuite name="s"><testcase name="outer">{inner}</testcase></testsuite>"#
+        ));
+        assert_eq!(
+            (c.name.as_str(), c.outcome),
+            ("outer", Outcome::Passed),
+            "{inner}"
+        );
+    }
+}
+
+#[test]
 fn properties_and_suite_level_output_are_ignored() {
     let report = parse_str(
         r#"<testsuites><testsuite name="s">
@@ -384,12 +413,10 @@ fn unknown_entity_is_an_error() {
 
 #[test]
 fn not_utf8_file_is_an_error() {
-    let dir = std::env::temp_dir().join(format!("greenshift-junit-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("latin1.xml");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("latin1.xml");
     std::fs::write(&path, b"<testsuite name=\"caf\xe9\"/>").unwrap();
     let err = parse_file(&path).unwrap_err();
-    std::fs::remove_dir_all(&dir).unwrap();
     assert!(matches!(err, JunitError::NotUtf8), "{err:?}");
 }
 
@@ -439,6 +466,23 @@ fn bad_time_error_escapes_control_bytes_in_name_and_time() {
     assert!(!text.contains('\u{1b}'), "{text:?}");
     assert!(text.contains("sprocket"), "{text:?}");
     assert!(text.contains("bad"), "{text:?}");
+}
+
+#[test]
+fn xml_errors_escape_control_bytes_quoted_from_the_file() {
+    // quick-xml does not validate name characters, and its error messages
+    // quote the offending end tag or entity name verbatim.
+    for xml in [
+        "<testsuites></testsuites\u{1b}[31mevil>",
+        "<testsuites><testsuite name=\"s\">&\u{1b}[31mevil;</testsuite></testsuites>",
+        "<testsuites><testsuite name=\"&\u{1b}[31mevil;\"></testsuite></testsuites>",
+    ] {
+        let err = parse_str(xml).unwrap_err();
+        assert!(matches!(err, JunitError::Xml { .. }), "{err:?}");
+        let text = err.to_string();
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert!(text.contains("evil"), "{text:?}");
+    }
 }
 
 #[test]

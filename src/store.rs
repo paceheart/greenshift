@@ -169,11 +169,19 @@ impl Store {
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_CREATE
             | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let conn =
-            Connection::open_with_flags(path, flags).map_err(|source| StoreError::Sqlite {
-                path: shown.clone(),
-                source,
-            })?;
+        // The bundled SQLite is built with SQLITE_USE_URI, so a name starting
+        // with `file:` is parsed as a URI whatever the open flags say, and
+        // `file::memory:` or `?mode=memory` would silently open an in-memory
+        // database. Anchoring a relative path at `./` makes SQLite read it as
+        // the plain file name it is.
+        let anchored;
+        let sqlite_path = if path.is_relative() {
+            anchored = Path::new(".").join(path);
+            &anchored
+        } else {
+            path
+        };
+        let conn = Connection::open_with_flags(sqlite_path, flags).map_err(sqlite_err(&shown))?;
         Store::init(conn, shown)
     }
 
@@ -198,10 +206,7 @@ impl Store {
     }
 
     fn sqlite(&self, source: rusqlite::Error) -> StoreError {
-        StoreError::Sqlite {
-            path: self.path.clone(),
-            source,
-        }
+        sqlite_err(&self.path)(source)
     }
 
     /// The schema version of the open store.
@@ -212,27 +217,24 @@ impl Store {
     }
 
     fn migrate(&mut self) -> Result<(), StoreError> {
-        let path = self.path.clone();
-        let sqlite = |source| StoreError::Sqlite {
-            path: path.clone(),
-            source,
-        };
+        let path = &self.path;
+        let sqlite = sqlite_err(path);
         // IMMEDIATE takes the write lock before reading the version, so two
         // processes opening a fresh store cannot both apply a migration.
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(sqlite)?;
+            .map_err(&sqlite)?;
         let app_id: i32 = tx
             .pragma_query_value(None, "application_id", |row| row.get(0))
-            .map_err(sqlite)?;
+            .map_err(&sqlite)?;
         let found: i64 = if app_id == APPLICATION_ID {
             tx.pragma_query_value(None, "user_version", |row| row.get(0))
-                .map_err(sqlite)?
+                .map_err(&sqlite)?
         } else {
             let objects: i64 = tx
                 .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
-                .map_err(sqlite)?;
+                .map_err(&sqlite)?;
             if objects > 0 {
                 return Err(StoreError::NotAStore {
                     path: path.clone(),
@@ -258,17 +260,17 @@ impl Store {
             });
         }
         for (from, sql) in MIGRATIONS.iter().enumerate().skip(found as usize) {
-            tx.execute_batch(sql).map_err(sqlite)?;
+            tx.execute_batch(sql).map_err(&sqlite)?;
             if from == 0 {
                 // Stamp the store exactly once, from the one constant that
                 // Store::open's own gate above compares against.
                 tx.pragma_update(None, "application_id", APPLICATION_ID)
-                    .map_err(sqlite)?;
+                    .map_err(&sqlite)?;
             }
             tx.pragma_update(None, "user_version", from as i64 + 1)
-                .map_err(sqlite)?;
+                .map_err(&sqlite)?;
         }
-        tx.commit().map_err(sqlite)
+        tx.commit().map_err(&sqlite)
     }
 
     /// Record one run and all of its results in a single transaction: either
@@ -284,60 +286,65 @@ impl Store {
         cases: impl IntoIterator<Item = &'c TestCase>,
     ) -> Result<Recorded, StoreError> {
         let merged = merge_duplicates(cases);
-        let path = self.path.clone();
-        let sqlite = |source| StoreError::Sqlite {
-            path: path.clone(),
-            source,
-        };
-        let tx = self.conn.transaction().map_err(sqlite)?;
+        let path = &self.path;
+        let sqlite = sqlite_err(path);
+        let tx = self.conn.transaction().map_err(&sqlite)?;
         tx.execute(
             "INSERT INTO runs (commit_sha, source) VALUES (?1, ?2)",
             params![run.commit, run.source],
         )
-        .map_err(sqlite)?;
+        .map_err(&sqlite)?;
         let run_id = tx.last_insert_rowid();
         {
             let mut add_file = tx
                 .prepare("INSERT INTO run_files (run_id, position, path) VALUES (?1, ?2, ?3)")
-                .map_err(sqlite)?;
+                .map_err(&sqlite)?;
             for (position, file) in run.files.iter().enumerate() {
                 add_file
                     .execute(params![run_id, position as i64, path_bytes(file)])
-                    .map_err(sqlite)?;
+                    .map_err(&sqlite)?;
             }
         }
         {
             let mut find_test = tx
                 .prepare("SELECT id FROM tests WHERE suite = ?1 AND name = ?2")
-                .map_err(sqlite)?;
+                .map_err(&sqlite)?;
             let mut add_test = tx
                 .prepare("INSERT INTO tests (suite, name) VALUES (?1, ?2)")
-                .map_err(sqlite)?;
+                .map_err(&sqlite)?;
             let mut add_result = tx
                 .prepare(
                     "INSERT INTO results (run_id, test_id, outcome, duration_ms)
                      VALUES (?1, ?2, ?3, ?4)",
                 )
-                .map_err(sqlite)?;
+                .map_err(&sqlite)?;
             for c in &merged {
                 let existing: Option<i64> = find_test
                     .query_row(params![c.suite, c.name], |r| r.get(0))
                     .optional()
-                    .map_err(sqlite)?;
+                    .map_err(&sqlite)?;
                 let test_id = match existing {
                     Some(id) => id,
-                    None => add_test.insert(params![c.suite, c.name]).map_err(sqlite)?,
+                    None => add_test.insert(params![c.suite, c.name]).map_err(&sqlite)?,
                 };
                 add_result
                     .execute(params![run_id, test_id, c.outcome.as_str(), c.duration_ms])
-                    .map_err(sqlite)?;
+                    .map_err(&sqlite)?;
             }
         }
-        tx.commit().map_err(sqlite)?;
+        tx.commit().map_err(&sqlite)?;
         Ok(Recorded {
             run_id,
             results: merged.len(),
         })
+    }
+}
+
+/// Wraps a SQLite error with the store path it happened on.
+fn sqlite_err(path: &str) -> impl Fn(rusqlite::Error) -> StoreError + '_ {
+    move |source| StoreError::Sqlite {
+        path: path.to_owned(),
+        source,
     }
 }
 

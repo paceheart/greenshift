@@ -162,6 +162,19 @@ fn open_creates_the_parent_directory_and_is_idempotent() {
     assert_eq!(strings(&store, "SELECT name FROM tests"), ["t"]);
 }
 
+#[test]
+fn a_parent_that_is_a_file_is_a_create_dir_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let blocker = dir.path().join("blocker");
+    std::fs::write(&blocker, "").unwrap();
+    let err = Store::open(&blocker.join("sub/history.sqlite")).unwrap_err();
+    assert!(
+        matches!(err, StoreError::CreateDir { ref path, .. } if *path == blocker.join("sub").display().to_string()),
+        "{err:?}"
+    );
+    assert!(blocker.is_file());
+}
+
 fn application_id(store: &Store) -> i64 {
     store
         .conn

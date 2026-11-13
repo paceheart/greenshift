@@ -295,3 +295,22 @@ fn ingest_help_lists_its_options() {
                 .and(predicate::str::contains(".greenshift/history.sqlite")),
         );
 }
+
+// `?` is not allowed in Windows file names.
+#[cfg(unix)]
+#[test]
+fn a_db_path_that_looks_like_a_sqlite_uri_is_an_ordinary_file() {
+    // The bundled SQLite parses `file:` names as URIs; these would otherwise
+    // open a private in-memory database and record nothing to disk.
+    for name in ["file::memory:", "file:history.sqlite?mode=memory"] {
+        let dir = tempfile::tempdir().unwrap();
+        greenshift()
+            .current_dir(dir.path())
+            .args(["ingest", "--db", name])
+            .arg(fixture("nextest.xml"))
+            .assert()
+            .success();
+        let conn = Connection::open(dir.path().join(name)).unwrap();
+        assert_eq!(count(&conn, "runs"), 1, "{name}");
+    }
+}

@@ -32,7 +32,8 @@ greenshift ingest target/nextest/default/junit.xml \
 - `--commit` is optional. `--source` names the producer or CI job
   (default `junit`).
 - A test is identified by suite and name. The suite is the testcase's
-  `classname`, or the enclosing `<testsuite>` name when there is none.
+  `classname`, or the enclosing `<testsuite>` name when there is none; it is
+  empty when neither is given.
 - Outcomes are `passed`, `failed`, `error` and `skipped`; durations are
   stored in whole milliseconds. Failure text and test output are not stored.
 - greenshift exits 1 and writes nothing if any file is unreadable or not

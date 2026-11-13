@@ -16,7 +16,7 @@
 //!
 //! A test's identity is its suite plus its name. The suite is the testcase's
 //! `classname` when it has a non-empty one, and otherwise the `name` of the
-//! innermost enclosing `<testsuite>`.
+//! innermost enclosing `<testsuite>`, and empty when neither gives one.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -81,7 +81,8 @@ pub enum JunitError {
     #[error("not valid UTF-8")]
     NotUtf8,
     // quick-xml's own errors repeat their cause in both Display and
-    // source(), so keep the text rather than chaining it.
+    // source(), so keep the text rather than chaining it. `xml_err` escapes
+    // the control characters in it, since it quotes text from the file.
     #[error("malformed XML at byte {position}: {message}")]
     Xml { position: u64, message: String },
     #[error("not JUnit XML: root element is {0:?}, expected <testsuites> or <testsuite>")]
@@ -264,11 +265,20 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
 /// `position` is where the reader failed for errors from `read_event`, and
 /// the start of the event being examined for errors found after it (in
 /// attributes or references): the reader has no position for those.
+///
+/// quick-xml's messages quote text from the file (tag names, entity names)
+/// verbatim, so control characters in them are escaped, as `{:?}` does for
+/// the other variants, before they can reach a terminal.
 fn xml_err(position: u64, source: quick_xml::Error) -> JunitError {
-    JunitError::Xml {
-        position,
-        message: source.to_string(),
+    let mut message = String::new();
+    for c in source.to_string().chars() {
+        if c.is_control() {
+            message.extend(c.escape_default());
+        } else {
+            message.push(c);
+        }
     }
+    JunitError::Xml { position, message }
 }
 
 fn start_case(
