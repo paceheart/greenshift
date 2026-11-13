@@ -585,3 +585,229 @@ fn schema_rejects_an_unknown_outcome_and_dangling_ids() {
     let err = insert(1, 1, "failed").unwrap_err();
     assert!(err.to_string().contains("UNIQUE"), "{err}");
 }
+
+fn run_from(source: &'static str) -> NewRun<'static> {
+    NewRun {
+        commit: None,
+        source,
+        files: &[],
+    }
+}
+
+/// The history as (run id, source, [(suite, name, outcome, ms)]), so tests
+/// need not know test ids.
+fn named(history: &History) -> Vec<(i64, String, Vec<Row>)> {
+    history
+        .runs
+        .iter()
+        .map(|run| {
+            let results = run
+                .results
+                .iter()
+                .map(|r| {
+                    let (suite, name) = &history.tests[&r.test_id];
+                    (
+                        suite.as_raw().to_owned(),
+                        name.as_raw().to_owned(),
+                        r.outcome.as_str().to_owned(),
+                        r.duration_ms,
+                    )
+                })
+                .collect();
+            (run.id, run.source.clone(), results)
+        })
+        .collect()
+}
+
+#[test]
+fn history_reads_every_run_oldest_first_with_its_results() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .record_run(
+            &run_from("ci"),
+            &[
+                tc("s", "b", Outcome::Failed, Some(3)),
+                tc("s", "a", Outcome::Passed, None),
+            ],
+        )
+        .unwrap();
+    store
+        .record_run(
+            &run_from("local"),
+            &[
+                tc("s", "a", Outcome::Error, Some(7)),
+                tc("t", "c", Outcome::Skipped, Some(0)),
+            ],
+        )
+        .unwrap();
+    let history = store.history(&[]).unwrap();
+    assert_eq!(
+        named(&history),
+        [
+            (
+                1,
+                "ci".into(),
+                vec![
+                    row("s", "b", "failed", Some(3)),
+                    row("s", "a", "passed", None)
+                ]
+            ),
+            (
+                2,
+                "local".into(),
+                vec![
+                    row("s", "a", "error", Some(7)),
+                    row("t", "c", "skipped", Some(0))
+                ]
+            ),
+        ]
+    );
+    // Results within a run are in test id order.
+    let ids: Vec<i64> = history.runs[1].results.iter().map(|r| r.test_id).collect();
+    assert!(ids.windows(2).all(|w| w[0] < w[1]), "{ids:?}");
+}
+
+#[test]
+fn history_keeps_only_the_given_sources() {
+    let mut store = Store::open_in_memory().unwrap();
+    for source in ["ci", "local", "nightly", "ci"] {
+        store
+            .record_run(
+                &run_from(source),
+                &[tc("s", source, Outcome::Passed, Some(1))],
+            )
+            .unwrap();
+    }
+    let runs = |sources: &[&str]| -> Vec<(i64, String)> {
+        let sources: Vec<String> = sources.iter().map(|s| s.to_string()).collect();
+        store
+            .history(&sources)
+            .unwrap()
+            .runs
+            .iter()
+            .map(|r| (r.id, r.source.clone()))
+            .collect()
+    };
+    assert_eq!(runs(&["ci"]), [(1, "ci".into()), (4, "ci".into())]);
+    assert_eq!(
+        runs(&["nightly", "ci"]),
+        [(1, "ci".into()), (3, "nightly".into()), (4, "ci".into())]
+    );
+    assert_eq!(runs(&["absent"]), []);
+    assert_eq!(runs(&[]).len(), 4);
+    let only_ci = store.history(&["ci".into()]).unwrap();
+    assert!(only_ci.runs.iter().all(|r| r.results.len() == 1));
+}
+
+#[test]
+fn history_of_an_empty_store_is_empty() {
+    let store = Store::open_in_memory().unwrap();
+    assert_eq!(store.history(&[]).unwrap().runs, []);
+}
+
+#[test]
+fn a_read_only_open_of_a_missing_file_is_none_and_creates_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sub/history.sqlite");
+    assert!(Store::open_read_only(&path).unwrap().is_none());
+    assert!(!dir.path().join("sub").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_read_only_open_of_a_file_that_cannot_be_checked_is_an_error_not_none() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let locked = dir.path().join("locked");
+    let path = locked.join("history.sqlite");
+    {
+        let mut store = Store::open(&path).unwrap();
+        store
+            .record_run(&RUN, &[tc("s", "t", Outcome::Passed, Some(1))])
+            .unwrap();
+    }
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let checkable = path.try_exists().is_ok();
+    let opened = Store::open_read_only(&path);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if checkable {
+        // Running as root: permissions are not enforced, nothing to test.
+        return;
+    }
+    let err = opened.unwrap_err();
+    assert!(matches!(err, StoreError::Sqlite { .. }), "{err:?}");
+}
+
+#[test]
+fn a_read_only_open_of_an_empty_sqlite_file_is_none_and_leaves_it_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.sqlite");
+    std::fs::write(&path, "").unwrap();
+    assert!(Store::open_read_only(&path).unwrap().is_none());
+    assert_eq!(std::fs::read(&path).unwrap(), b"");
+}
+
+#[test]
+fn a_read_only_open_reads_a_store_without_writing_to_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.sqlite");
+    {
+        let mut store = Store::open(&path).unwrap();
+        store
+            .record_run(&RUN, &[tc("s", "t", Outcome::Passed, Some(1))])
+            .unwrap();
+    }
+    let before = std::fs::read(&path).unwrap();
+    let store = Store::open_read_only(&path).unwrap().unwrap();
+    let history = store.history(&[]).unwrap();
+    assert_eq!(named(&history)[0].2, [row("s", "t", "passed", Some(1))]);
+    // The connection itself refuses writes.
+    assert!(store
+        .conn
+        .execute("INSERT INTO runs (source) VALUES ('x')", [])
+        .is_err());
+    drop(store);
+    assert_eq!(std::fs::read(&path).unwrap(), before, "file was modified");
+}
+
+#[test]
+fn a_read_only_open_refuses_what_open_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let foreign = dir.path().join("foreign.sqlite");
+    let before = foreign_db(&foreign, 0x1234_5678);
+    let err = Store::open_read_only(&foreign).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            StoreError::NotAStore {
+                found: 0x1234_5678,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert_eq!(std::fs::read(&foreign).unwrap(), before);
+
+    for (version, newer) in [(SCHEMA_VERSION + 1, true), (-1, false)] {
+        let path = dir.path().join(format!("v{version}.sqlite"));
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "application_id", APPLICATION_ID)
+            .unwrap();
+        conn.pragma_update(None, "user_version", version).unwrap();
+        drop(conn);
+        let err = Store::open_read_only(&path).unwrap_err();
+        if newer {
+            assert!(matches!(err, StoreError::TooNew { .. }), "{err:?}");
+        } else {
+            assert!(
+                matches!(err, StoreError::BadVersion { found: -1, .. }),
+                "{err:?}"
+            );
+        }
+    }
+
+    for special in [":memory:", ""] {
+        let err = Store::open_read_only(Path::new(special)).unwrap_err();
+        assert!(matches!(err, StoreError::MemoryPath { .. }), "{err:?}");
+    }
+}

@@ -30,7 +30,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtension};
 
 use crate::junit::{Outcome, Tainted, TestCase};
 
@@ -112,7 +112,7 @@ pub enum StoreError {
         supported: i64,
     },
     #[error(
-        "{path} is not a greenshift history store (SQLite application_id {found}, expected {expected}); refusing to write to it"
+        "{path} is not a greenshift history store (SQLite application_id {found}, expected {expected}); refusing to use it"
     )]
     NotAStore {
         path: String,
@@ -146,6 +146,33 @@ pub struct Recorded {
     pub results: usize,
 }
 
+/// One stored result, as read back by [`Store::history`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredResult {
+    /// `tests.id`; [`History::tests`] names it.
+    pub test_id: i64,
+    pub outcome: Outcome,
+    pub duration_ms: Option<i64>,
+}
+
+/// One stored run and its results, as read back by [`Store::history`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredRun {
+    pub id: i64,
+    pub source: String,
+    /// The run's results, by test id.
+    pub results: Vec<StoredResult>,
+}
+
+/// The runs and results [`Store::history`] read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct History {
+    /// Oldest first, by run id.
+    pub runs: Vec<StoredRun>,
+    /// Suite and name of every test, by test id.
+    pub tests: HashMap<i64, (Tainted, Tainted)>,
+}
+
 /// An open, migrated history store.
 #[derive(Debug)]
 pub struct Store {
@@ -157,13 +184,7 @@ impl Store {
     /// Open (creating if needed) the store at `path`, creating its parent
     /// directory, and migrate it to [`SCHEMA_VERSION`].
     pub fn open(path: &Path) -> Result<Store, StoreError> {
-        // The empty name is SQLite's private temporary database, deleted
-        // when the connection closes, so nothing would persist.
-        if path == Path::new(":memory:") || path.as_os_str().is_empty() {
-            return Err(StoreError::MemoryPath {
-                path: format!("{:?}", path.as_os_str()),
-            });
-        }
+        refuse_memory_path(path)?;
         let shown = path.display().to_string();
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir).map_err(|source| StoreError::CreateDir {
@@ -174,21 +195,71 @@ impl Store {
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_CREATE
             | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        // The bundled SQLite is built with SQLITE_USE_URI, so a name starting
-        // with `file:` is parsed as a URI whatever the open flags say, and
-        // `file::memory:` or `?mode=memory` would silently open an in-memory
-        // database. Anchoring such a path at `./` makes SQLite read it as the
-        // plain file name it is. Other paths are passed as given, so SQLite's
-        // own error text names the path the user typed.
-        let anchored;
-        let sqlite_path = if path.as_os_str().as_encoded_bytes().starts_with(b"file:") {
-            anchored = Path::new(".").join(path);
-            &anchored
-        } else {
-            path
-        };
-        let conn = Connection::open_with_flags(sqlite_path, flags).map_err(sqlite_err(&shown))?;
+        let conn =
+            Connection::open_with_flags(as_plain_file(path), flags).map_err(sqlite_err(&shown))?;
         Store::init(conn, shown)
+    }
+
+    /// Open the store at `path` for reading only: nothing is created,
+    /// migrated or written. `None` when there is no history to read: the
+    /// file does not exist, or is a SQLite file with no schema at all.
+    /// Anything that is not a greenshift store is refused as by
+    /// [`Store::open`].
+    pub fn open_read_only(path: &Path) -> Result<Option<Store>, StoreError> {
+        refuse_memory_path(path)?;
+        // Only a file known to be missing is no history. When its existence
+        // cannot be checked (a directory on the way is unreadable, say), the
+        // open below fails and says why.
+        if matches!(path.try_exists(), Ok(false)) {
+            return Ok(None);
+        }
+        let shown = path.display().to_string();
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn =
+            Connection::open_with_flags(as_plain_file(path), flags).map_err(sqlite_err(&shown))?;
+        let sqlite = sqlite_err(&shown);
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(&sqlite)?;
+        let app_id: i32 = conn
+            .pragma_query_value(None, "application_id", |row| row.get(0))
+            .map_err(&sqlite)?;
+        if app_id != APPLICATION_ID {
+            let objects: i64 = conn
+                .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
+                .map_err(&sqlite)?;
+            if objects > 0 {
+                return Err(StoreError::NotAStore {
+                    path: shown.clone(),
+                    found: app_id,
+                    expected: APPLICATION_ID,
+                });
+            }
+            return Ok(None);
+        }
+        let found: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(&sqlite)?;
+        if found < 0 {
+            return Err(StoreError::BadVersion {
+                path: shown.clone(),
+                found,
+            });
+        }
+        if found > SCHEMA_VERSION {
+            return Err(StoreError::TooNew {
+                path: shown.clone(),
+                found,
+                supported: SCHEMA_VERSION,
+            });
+        }
+        // Migration 1 stamps the application_id and the version in one
+        // transaction, so a marked store at version 0 holds nothing. With a
+        // single schema version there is no older one to read.
+        if found == 0 {
+            return Ok(None);
+        }
+        drop(sqlite);
+        Ok(Some(Store { conn, path: shown }))
     }
 
     /// A migrated store that lives only in memory.
@@ -343,6 +414,129 @@ impl Store {
             results: merged.len(),
         })
     }
+
+    /// Every run from `sources` (from every source when `sources` is
+    /// empty) with its results, read in one transaction so the runs and
+    /// results agree.
+    pub fn history(&self, sources: &[String]) -> Result<History, StoreError> {
+        let sqlite = sqlite_err(&self.path);
+        let tx = self.conn.unchecked_transaction().map_err(&sqlite)?;
+        let filter = if sources.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "WHERE u.source IN ({})",
+                vec!["?"; sources.len()].join(", ")
+            )
+        };
+        let mut runs: Vec<StoredRun> = tx
+            .prepare(&format!(
+                "SELECT u.id, u.source FROM runs u {filter} ORDER BY u.id"
+            ))
+            .and_then(|mut stmt| {
+                stmt.query_map(params_from_iter(sources), |r| {
+                    Ok(StoredRun {
+                        id: r.get(0)?,
+                        source: r.get(1)?,
+                        results: Vec::new(),
+                    })
+                })?
+                .collect()
+            })
+            .map_err(&sqlite)?;
+        let results: Vec<(i64, StoredResult)> = tx
+            .prepare(&format!(
+                "SELECT r.run_id, r.test_id, r.outcome, r.duration_ms
+                 FROM results r JOIN runs u ON u.id = r.run_id {filter}
+                 ORDER BY r.run_id, r.test_id"
+            ))
+            .and_then(|mut stmt| {
+                stmt.query_map(params_from_iter(sources), |r| {
+                    let outcome: String = r.get(2)?;
+                    let outcome = stored_outcome(&outcome).ok_or_else(|| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            format!("unknown outcome {outcome:?}").into(),
+                        )
+                    })?;
+                    Ok((
+                        r.get(0)?,
+                        StoredResult {
+                            test_id: r.get(1)?,
+                            outcome,
+                            duration_ms: r.get(3)?,
+                        },
+                    ))
+                })?
+                .collect()
+            })
+            .map_err(&sqlite)?;
+        let tests = tx
+            .prepare("SELECT id, suite, name FROM tests")
+            .and_then(|mut stmt| {
+                stmt.query_map([], |r| {
+                    let suite: String = r.get(1)?;
+                    let name: String = r.get(2)?;
+                    Ok((r.get(0)?, (suite.into(), name.into())))
+                })?
+                .collect()
+            })
+            .map_err(&sqlite)?;
+        tx.finish().map_err(&sqlite)?;
+        // Both lists are in run id order, so one pass files each result
+        // under its run.
+        let mut next = runs.iter_mut().peekable();
+        for (run_id, result) in results {
+            while next.peek().is_some_and(|run| run.id < run_id) {
+                next.next();
+            }
+            if let Some(run) = next.peek_mut().filter(|run| run.id == run_id) {
+                run.results.push(result);
+            }
+        }
+        Ok(History { runs, tests })
+    }
+}
+
+/// SQLite's in-memory names would open a database that vanishes on close.
+fn refuse_memory_path(path: &Path) -> Result<(), StoreError> {
+    // The empty name is SQLite's private temporary database, deleted
+    // when the connection closes, so nothing would persist.
+    if path == Path::new(":memory:") || path.as_os_str().is_empty() {
+        return Err(StoreError::MemoryPath {
+            path: format!("{:?}", path.as_os_str()),
+        });
+    }
+    Ok(())
+}
+
+/// The name to hand SQLite so that it opens `path` as a plain file.
+///
+/// The bundled SQLite is built with SQLITE_USE_URI, so a name starting
+/// with `file:` is parsed as a URI whatever the open flags say, and
+/// `file::memory:` or `?mode=memory` would silently open an in-memory
+/// database. Anchoring such a path at `./` makes SQLite read it as the
+/// plain file name it is. Other paths are passed as given, so SQLite's
+/// own error text names the path the user typed.
+fn as_plain_file(path: &Path) -> std::borrow::Cow<'_, Path> {
+    if path.as_os_str().as_encoded_bytes().starts_with(b"file:") {
+        std::borrow::Cow::Owned(Path::new(".").join(path))
+    } else {
+        std::borrow::Cow::Borrowed(path)
+    }
+}
+
+/// The outcome stored as `text`, if it is one.
+fn stored_outcome(text: &str) -> Option<Outcome> {
+    [
+        Outcome::Passed,
+        Outcome::Failed,
+        Outcome::Error,
+        Outcome::Skipped,
+    ]
+    .into_iter()
+    .find(|o| o.as_str() == text)
 }
 
 /// Wraps a SQLite error with the store path it happened on.
