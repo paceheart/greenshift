@@ -20,8 +20,8 @@
 //!
 //! Text the parser takes from the file (test and suite names, and the
 //! root tag, attribute values and entity names its errors quote) is
-//! [`Tainted`], so it prints escaped. quick-xml's own messages, which can
-//! quote the file, are escaped when the error is made.
+//! [`Tainted`], so it prints escaped. So are quick-xml's own messages,
+//! which can quote the file.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -86,10 +86,10 @@ pub enum JunitError {
     #[error("not valid UTF-8")]
     NotUtf8,
     // quick-xml's own errors repeat their cause in both Display and
-    // source(), so keep the text rather than chaining it. `xml_err` escapes
-    // it as `{:?}` would, since it quotes text from the file.
+    // source(), so keep the text rather than chaining it. It quotes text
+    // from the file, so it is `Tainted` too.
     #[error("malformed XML at byte {position}: {message}")]
-    Xml { position: u64, message: String },
+    Xml { position: u64, message: Tainted },
     #[error("malformed XML at byte {position}: unrecognized entity \"{name}\"")]
     UnknownEntity { position: u64, name: Tainted },
     #[error("not JUnit XML: root element is \"{0}\", expected <testsuites> or <testsuite>")]
@@ -274,14 +274,11 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
 /// attributes or references): the reader has no position for those.
 ///
 /// quick-xml's messages quote text from the file (tag names, entity names)
-/// verbatim, so they are escaped the way [`Tainted`] displays the other
-/// variants' file text (control and invisible characters such as bidi
-/// overrides, and backslash; quotes are left alone) before they can reach a
-/// terminal.
+/// verbatim, so they are kept as [`Tainted`] and print escaped.
 fn xml_err(position: u64, source: quick_xml::Error) -> JunitError {
     JunitError::Xml {
         position,
-        message: escape_file_text(&source.to_string()),
+        message: source.to_string().into(),
     }
 }
 
@@ -408,7 +405,7 @@ fn attr(e: &BytesStart<'_>, key: &[u8], position: u64) -> Result<Option<Tainted>
     use quick_xml::events::attributes::AttrError;
     for a in e.attributes() {
         let a = a.map_err(|s| {
-            let message = match s {
+            let message: String = match s {
                 AttrError::ExpectedEq(_) => {
                     "attribute key must be directly followed by `=` or space".into()
                 }
@@ -424,7 +421,10 @@ fn attr(e: &BytesStart<'_>, key: &[u8], position: u64) -> Result<Option<Tainted>
                 }
                 AttrError::Duplicated(..) => "duplicated attribute".into(),
             };
-            JunitError::Xml { position, message }
+            JunitError::Xml {
+                position,
+                message: message.into(),
+            }
         })?;
         if a.key.local_name().as_ref() == key {
             return match a.unescape_value() {
