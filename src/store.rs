@@ -157,8 +157,8 @@ impl Store {
     /// Open (creating if needed) the store at `path`, creating its parent
     /// directory, and migrate it to [`SCHEMA_VERSION`].
     pub fn open(path: &Path) -> Result<Store, StoreError> {
-        // The empty name is SQLite's private temporary database, which the
-        // bundled build (SQLITE_TEMP_STORE=2) also keeps in memory.
+        // The empty name is SQLite's private temporary database, deleted
+        // when the connection closes, so nothing would persist.
         if path == Path::new(":memory:") || path.as_os_str().is_empty() {
             return Err(StoreError::MemoryPath {
                 path: format!("{:?}", path.as_os_str()),

@@ -475,6 +475,20 @@ fn entity_errors_in_attributes_carry_no_attribute_relative_range() {
 }
 
 #[test]
+fn references_in_attributes_greenshift_does_not_read_are_not_checked() {
+    let c = one(
+        r#"<testsuites foo="&bogus;"><testsuite name="s"><testcase name="t" foo="&bogus;"><failure message="&#0;"/></testcase></testsuite></testsuites>"#,
+    );
+    assert_eq!((c.suite.as_str(), c.name.as_str()), ("s", "t"));
+    assert_eq!(c.outcome, Outcome::Failed);
+}
+
+#[test]
+fn escape_file_text_leaves_quotes_alone() {
+    assert_eq!(escape_file_text("a\"b'c\u{1b}\\"), "a\"b'c\\u{1b}\\\\");
+}
+
+#[test]
 fn not_utf8_file_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("latin1.xml");
