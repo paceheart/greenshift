@@ -123,8 +123,9 @@ reached.
 
 Exit status:
 
-- 0: the selection was printed (possibly nothing, when the universe is
-  empty).
+- 0: the selection was printed. That can be nothing at all: with no
+  failing full run there is no rich test, and until a test has
+  `--min-runs` results it is new, so a young history lists nothing.
 - 1: an error, such as a `--db` file that is not a greenshift store.
 - 2: no full run from the chosen sources, or no store at all. stderr says
   `no history: run the full suite` and nothing is printed to stdout.
