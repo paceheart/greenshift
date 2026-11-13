@@ -198,7 +198,7 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
                 match (tag, case.as_mut()) {
                     (b"testsuite", None) => {
                         if !empty {
-                            let name = attr(e, b"name").map_err(|s| xml_err(position, s))?;
+                            let name = attr(e, b"name", position)?;
                             suites.push((at, name.unwrap_or_default()));
                         }
                     }
@@ -274,14 +274,23 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
 /// backslash), except that quotes are left alone, before they can reach a
 /// terminal.
 fn xml_err(position: u64, source: quick_xml::Error) -> JunitError {
-    let mut message = String::new();
-    for c in source.to_string().chars() {
+    JunitError::Xml {
+        position,
+        message: escape_file_text(&source.to_string()),
+    }
+}
+
+/// Escape text quoted from a file as `{:?}` would, except that quotes are
+/// left alone, so it can be shown in an error message.
+pub(crate) fn escape_file_text(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
         match c {
-            '"' | '\'' => message.push(c),
-            _ => message.extend(c.escape_debug()),
+            '"' | '\'' => out.push(c),
+            _ => out.extend(c.escape_debug()),
         }
     }
-    JunitError::Xml { position, message }
+    out
 }
 
 fn start_case(
@@ -289,17 +298,14 @@ fn start_case(
     suites: &[(usize, String)],
     position: u64,
 ) -> Result<CaseBuilder, JunitError> {
-    let xml = |source| xml_err(position, source);
-    let Some(name) = attr(e, b"name").map_err(xml)?.filter(|n| !n.is_empty()) else {
+    let Some(name) = attr(e, b"name", position)?.filter(|n| !n.is_empty()) else {
         return Err(JunitError::MissingName { position });
     };
-    let classname = attr(e, b"classname")
-        .map_err(xml)?
-        .filter(|c| !c.is_empty());
+    let classname = attr(e, b"classname", position)?.filter(|c| !c.is_empty());
     let suite = classname
         .or_else(|| suites.last().map(|(_, s)| s.clone()))
         .unwrap_or_default();
-    let duration_ms = match attr(e, b"time").map_err(xml)? {
+    let duration_ms = match attr(e, b"time", position)? {
         None => None,
         Some(t) if t.trim().is_empty() => None,
         Some(t) => Some(seconds_to_ms(&t).ok_or_else(|| JunitError::BadTime {
@@ -331,12 +337,28 @@ fn seconds_to_ms(text: &str) -> Option<i64> {
     (ms < i64::MAX as f64).then_some(ms as i64)
 }
 
-/// An attribute's unescaped value, if present.
-fn attr(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>, quick_xml::Error> {
+/// An attribute's unescaped value, if present. `position` is the start of
+/// the element: quick-xml's escape errors carry a range relative to the
+/// attribute value, which would read as a file offset, so they are reported
+/// without it.
+fn attr(e: &BytesStart<'_>, key: &[u8], position: u64) -> Result<Option<String>, JunitError> {
+    use quick_xml::escape::EscapeError;
     for a in e.attributes() {
-        let a = a.map_err(quick_xml::Error::InvalidAttr)?;
+        let a = a.map_err(|s| xml_err(position, quick_xml::Error::InvalidAttr(s)))?;
         if a.key.local_name().as_ref() == key {
-            return Ok(Some(a.unescape_value()?.into_owned()));
+            return match a.unescape_value() {
+                Ok(v) => Ok(Some(v.into_owned())),
+                Err(quick_xml::Error::Escape(EscapeError::UnrecognizedEntity(_, name))) => {
+                    Err(JunitError::UnknownEntity { position, name })
+                }
+                Err(quick_xml::Error::Escape(EscapeError::UnterminatedEntity(_))) => {
+                    Err(JunitError::Xml {
+                        position,
+                        message: "cannot find ';' after '&'".into(),
+                    })
+                }
+                Err(s) => Err(xml_err(position, s)),
+            };
         }
     }
     Ok(None)

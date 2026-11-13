@@ -283,6 +283,14 @@ fn the_special_memory_name_is_refused_as_a_db_path() {
 }
 
 #[test]
+fn the_empty_name_is_refused_as_a_db_path() {
+    // SQLite opens "" as a private temporary database, gone on close.
+    let err = Store::open(Path::new("")).unwrap_err();
+    assert!(matches!(err, StoreError::MemoryPath { .. }), "{err:?}");
+    assert!(err.to_string().starts_with(r#""""#), "{err}");
+}
+
+#[test]
 fn store_with_a_negative_schema_version_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("history.sqlite");
@@ -525,9 +533,13 @@ fn a_failed_insert_writes_nothing() {
         ..RUN
     };
     let err = store.record_run(&run, &cases).unwrap_err();
-    let cause = std::error::Error::source(&err).expect("sqlite error is the source");
-    assert!(cause.to_string().contains("poisoned"), "{cause}");
-    assert!(!err.to_string().contains("poisoned"), "{err}");
+    // The cause is escaped into the message, not chained, so it prints once.
+    assert!(std::error::Error::source(&err).is_none(), "{err:?}");
+    assert!(
+        matches!(&err, StoreError::Sqlite { sqlite, .. } if sqlite.to_string().contains("poisoned")),
+        "{err:?}"
+    );
+    assert_eq!(err.to_string().matches("poisoned").count(), 1, "{err}");
     assert_eq!(count(&store, "runs"), 0);
     assert_eq!(count(&store, "run_files"), 0);
     assert_eq!(count(&store, "tests"), 0);

@@ -417,6 +417,24 @@ fn unknown_entity_is_an_error() {
 }
 
 #[test]
+fn entity_errors_in_attributes_carry_no_attribute_relative_range() {
+    // quick-xml reports these with a range inside the attribute value, which
+    // would read as a second, wrong file offset after "at byte N".
+    let err =
+        parse_str(r#"<testsuite name="s"><testcase name="t&bogus;"/></testsuite>"#).unwrap_err();
+    assert!(
+        matches!(err, JunitError::UnknownEntity { position: 20, ref name } if name == "bogus"),
+        "{err:?}"
+    );
+    let err = parse_str(r#"<testsuite name="s"><testcase name="t&amp"/></testsuite>"#).unwrap_err();
+    assert!(
+        matches!(err, JunitError::Xml { position: 20, .. }),
+        "{err:?}"
+    );
+    assert!(!err.to_string().contains(".."), "{err}");
+}
+
+#[test]
 fn not_utf8_file_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("latin1.xml");
@@ -477,19 +495,23 @@ fn bad_time_error_escapes_control_bytes_in_name_and_time() {
 fn xml_errors_escape_control_bytes_quoted_from_the_file() {
     // quick-xml does not validate name characters, and its error messages
     // quote the offending end tag or entity name verbatim.
-    for xml in [
-        "<testsuites></testsuites\u{1b}[31mevil>",
-        "<testsuites><testsuite name=\"s\">&\u{1b}[31mevil;</testsuite></testsuites>",
-        "<testsuites><testsuite name=\"&\u{1b}[31mevil;\"></testsuite></testsuites>",
+    for (xml, entity) in [
+        ("<testsuites></testsuites\u{1b}[31mevil>", false),
+        (
+            "<testsuites><testsuite name=\"s\">&\u{1b}[31mevil;</testsuite></testsuites>",
+            true,
+        ),
+        (
+            "<testsuites><testsuite name=\"&\u{1b}[31mevil;\"></testsuite></testsuites>",
+            true,
+        ),
     ] {
         let err = parse_str(xml).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                JunitError::Xml { .. } | JunitError::UnknownEntity { .. }
-            ),
-            "{err:?}"
-        );
+        if entity {
+            assert!(matches!(err, JunitError::UnknownEntity { .. }), "{err:?}");
+        } else {
+            assert!(matches!(err, JunitError::Xml { .. }), "{err:?}");
+        }
         let text = err.to_string();
         assert!(!text.contains('\u{1b}'), "{text:?}");
         assert!(text.contains(r"\u{1b}[31mevil"), "{text:?}");

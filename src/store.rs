@@ -94,11 +94,14 @@ pub enum StoreError {
         #[source]
         source: std::io::Error,
     },
-    #[error("history store {path}")]
+    // SQLite's messages can quote text from the store file itself (a
+    // malformed schema, say), so the whole cause chain is escaped into
+    // `message` rather than chained as a source and printed raw.
+    #[error("history store {path}: {message}")]
     Sqlite {
         path: String,
-        #[source]
-        source: rusqlite::Error,
+        message: String,
+        sqlite: rusqlite::Error,
     },
     #[error(
         "history store {path} has schema version {found}, newer than this greenshift supports ({supported}); upgrade greenshift"
@@ -154,9 +157,11 @@ impl Store {
     /// Open (creating if needed) the store at `path`, creating its parent
     /// directory, and migrate it to [`SCHEMA_VERSION`].
     pub fn open(path: &Path) -> Result<Store, StoreError> {
-        if path == Path::new(":memory:") {
+        // The empty name is SQLite's private temporary database, which the
+        // bundled build (SQLITE_TEMP_STORE=2) also keeps in memory.
+        if path == Path::new(":memory:") || path.as_os_str().is_empty() {
             return Err(StoreError::MemoryPath {
-                path: ":memory:".into(),
+                path: format!("{:?}", path.as_os_str()),
             });
         }
         let shown = path.display().to_string();
@@ -340,9 +345,19 @@ impl Store {
 
 /// Wraps a SQLite error with the store path it happened on.
 fn sqlite_err(path: &str) -> impl Fn(rusqlite::Error) -> StoreError + '_ {
-    move |source| StoreError::Sqlite {
-        path: path.to_owned(),
-        source,
+    move |sqlite| {
+        let mut chain = sqlite.to_string();
+        let mut cause = std::error::Error::source(&sqlite);
+        while let Some(c) = cause {
+            chain.push_str(": ");
+            chain.push_str(&c.to_string());
+            cause = c.source();
+        }
+        StoreError::Sqlite {
+            path: path.to_owned(),
+            message: crate::junit::escape_file_text(&chain),
+            sqlite,
+        }
     }
 }
 

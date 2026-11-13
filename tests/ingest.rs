@@ -332,3 +332,27 @@ fn a_db_that_cannot_be_opened_is_named_as_given() {
                 .and(predicate::str::contains("./store").not()),
         );
 }
+
+#[test]
+fn sqlite_errors_quoting_the_store_file_escape_control_bytes() {
+    // A store whose schema text holds a terminal escape: SQLite's
+    // "malformed database schema" message quotes it from the file.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("history.sqlite");
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE t(x);
+         PRAGMA writable_schema = ON;
+         UPDATE sqlite_schema SET name = 't' || char(27) || '[31mRED',
+             sql = 'CREATE TABLE t(x) ' || char(27) || '[31mRED';",
+    )
+    .unwrap();
+    drop(conn);
+    ingest(&db, &[fixture("nextest.xml")], &[])
+        .failure()
+        .stderr(
+            predicate::str::contains("malformed database schema")
+                .and(predicate::str::contains(r"\u{1b}[31mRED"))
+                .and(predicate::str::contains("\u{1b}").not()),
+        );
+}
