@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="vaelii-run-vars" tests="7" failures="1" errors="2" skipped="2" time="2.418734" timestamp="2026-11-12T18:04:11.532871Z">
+    <testcase classname="ghost-gate" name="unknown-var" time="0.000000" assertions="0">
+      <skipped message="not found"/>
+    </testcase>
+    <testcase classname="widgets.sprocket-test" name="parses-a-sprocket" time="0.012345" assertions="4"/>
+    <testcase classname="widgets.sprocket-test" name="rejects-a-bent-cog" time="0.103500" assertions="3">
+      <failure message="cog teeth must be even" type="assertion">rejecting odd cogs
+expected: (= 12 (count-teeth cog))
+  actual: (not (= 12 11))</failure>
+      <failure message="assertion" type="assertion">expected: (even? &quot;11&quot;)
+  actual: (not (even? &quot;11&quot;))</failure>
+    </testcase>
+    <testcase classname="widgets.sprocket-test" name="spins-under-load" time="1.250000" assertions="2">
+      <error message="gear &lt;7&gt; jammed" type="java.lang.IllegalStateException">expected: nil
+  actual: java.lang.IllegalStateException: gear &lt;7&gt; jammed
+	at widgets.sprocket$spin.invokeStatic(sprocket.clj:88)
+	at widgets.sprocket_test$fn__1234.invoke(sprocket_test.clj:41)
+</error>
+    </testcase>
+    <testcase classname="widgets.flywheel-test" name="fixtures" time="0.000000" assertions="0">
+      <error message="flywheel store unavailable" type="clojure.lang.ExceptionInfo">clojure.lang.ExceptionInfo: flywheel store unavailable {}
+	at widgets.flywheel_test$with_store.invokeStatic(flywheel_test.clj:12)
+</error>
+    </testcase>
+    <testcase classname="widgets.flywheel-test" name="stores-momentum" time="0.000000" assertions="0">
+      <skipped message="not run: fixture error in widgets.flywheel-test"/>
+    </testcase>
+    <testcase classname="widgets.sprocket-test" name="counts-teeth" time="0.004200" assertions="1"/>
+  </testsuite>
+</testsuites>

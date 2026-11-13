@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="6" failures="1" errors="1" uuid="5b1c3a4e-8f2d-4c6b-9a7e-2d3f4a5b6c7d" timestamp="2026-11-12T18:20:03.441+00:00" time="1.732">
+    <testsuite name="sprocket-works" tests="4" disabled="1" errors="0" failures="1">
+        <testcase name="widgets::parses_a_sprocket" classname="sprocket-works" timestamp="2026-11-12T18:20:03.452+00:00" time="0.004">
+        </testcase>
+        <testcase name="widgets::rejects_a_bent_cog" classname="sprocket-works" timestamp="2026-11-12T18:20:03.453+00:00" time="0.012">
+            <failure type="test failure with exit code 101">thread &apos;widgets::rejects_a_bent_cog&apos; panicked at src/widgets.rs:42:9:
+assertion `left == right` failed
+  left: 11
+ right: 12
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace</failure>
+            <system-out>
+running 1 test
+test widgets::rejects_a_bent_cog ... FAILED
+</system-out>
+            <system-err>thread &apos;widgets::rejects_a_bent_cog&apos; panicked at src/widgets.rs:42:9:
+assertion `left == right` failed
+  left: 11
+ right: 12
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+</system-err>
+        </testcase>
+        <testcase name="widgets::spins_eventually" classname="sprocket-works" timestamp="2026-11-12T18:20:03.455+00:00" time="0.250">
+            <flakyFailure timestamp="2026-11-12T18:20:03.455+00:00" time="0.120" type="test failure with exit code 101">thread &apos;widgets::spins_eventually&apos; panicked at src/widgets.rs:77:5:
+spin timed out
+                <system-out>
+running 1 test
+test widgets::spins_eventually ... FAILED
+</system-out>
+                <system-err>thread &apos;widgets::spins_eventually&apos; panicked at src/widgets.rs:77:5:
+spin timed out
+</system-err>
+            </flakyFailure>
+            <system-out>
+running 1 test
+test widgets::spins_eventually ... ok
+</system-out>
+            <system-err></system-err>
+        </testcase>
+        <testcase name="widgets::needs_a_lathe" classname="sprocket-works" timestamp="2026-11-12T18:20:03.456+00:00" time="0.000">
+            <skipped/>
+        </testcase>
+    </testsuite>
+    <testsuite name="sprocket-works::assembly" tests="2" disabled="0" errors="1" failures="0">
+        <testcase name="assembles_a_gearbox" classname="sprocket-works::assembly" timestamp="2026-11-12T18:20:03.470+00:00" time="1.4567">
+            <error message="test aborted with signal 6 (SIGABRT)" type="test abort">
+running 1 test
+fatal runtime error: stack overflow
+</error>
+            <system-out>
+running 1 test
+</system-out>
+            <system-err>
+thread &apos;assembles_a_gearbox&apos; has overflowed its stack
+fatal runtime error: stack overflow
+</system-err>
+        </testcase>
+        <testcase name="lists_parts" classname="sprocket-works::assembly" timestamp="2026-11-12T18:20:03.480+00:00" time="0.0015">
+        </testcase>
+    </testsuite>
+</testsuites>
