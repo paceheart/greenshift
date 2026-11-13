@@ -308,10 +308,9 @@ fn malformed_fixture_is_an_xml_error() {
 #[test]
 fn truncated_document_is_an_error() {
     let err = parse_str(r#"<testsuites><testsuite name="s"><testcase name="t"/>"#).unwrap_err();
-    assert!(
-        matches!(err, JunitError::Truncated | JunitError::Xml { .. }),
-        "{err:?}"
-    );
+    // quick-xml reports this input as a clean end of file; only greenshift's
+    // own depth check catches it.
+    assert!(matches!(err, JunitError::Truncated), "{err:?}");
 }
 
 #[test]
