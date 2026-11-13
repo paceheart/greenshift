@@ -12,6 +12,8 @@ categories = ["command-line-utilities", "development-tools::testing"]
 [dependencies]
 anyhow = "1.0.98"
 clap = { version = "4.5.58", features = ["derive"] }
+quick-xml = "0.38"
+thiserror = "2"
 
 [dev-dependencies]
 assert_cmd = "2.1.2"

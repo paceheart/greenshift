@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<testsuites>
+  <testsuite name="widgets">
+    <testcase classname="widgets" name="parses_a_sprocket" time="0.1">
+  </testsuite>
+</testsuites>
