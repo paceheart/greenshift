@@ -38,13 +38,15 @@ greenshift ingest target/nextest/default/junit.xml \
 - greenshift exits 1 and writes nothing if any file is unreadable or not
   UTF-8, is XML that quick-xml rejects, has a root other than `<testsuites>`
   or `<testsuite>`, has content outside the root element, or has a
-  `<testcase>` without a name or with a `time` that is not seconds. The same
-  goes for an entity reference that is neither a character reference nor one
-  of XML's five predefined ones (`&amp;` and so on; entities declared in a
-  DTD are not supported) in element text, in a testcase's `name`,
-  `classname` or `time`, or in the `name` of a `<testsuite>` with content;
-  other attributes are not read. It does not otherwise validate
-  XML well-formedness: the input is expected to come from a known producer.
+  `<testcase>` without a name or with a `time` that is not seconds. Inside a
+  `<testcase>`, only which `<failure>`, `<error>` and `<skipped>` children it
+  has is read; anything else there, nested testcases included, is ignored.
+- An entity or character reference that cannot be resolved, in element text
+  or in an attribute greenshift reads, is also an error. Only XML's five
+  predefined entities (`&amp;` and so on) are known; entities declared in a
+  DTD are not supported. Other attributes are not read. greenshift does not
+  otherwise validate XML well-formedness: the input is expected to come from
+  a known producer.
 
 Known producers: cargo-nextest and vaelii's test runner. Anything that writes
 the common `<testsuites>/<testsuite>/<testcase>` shape should work.
