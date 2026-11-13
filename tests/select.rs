@@ -1,0 +1,237 @@
+//! Runs `greenshift select` on stores built by `greenshift ingest` from the
+//! fixtures, ingested several times with varied outcomes.
+
+use std::path::{Path, PathBuf};
+
+use assert_cmd::Command;
+
+fn fixture(name: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join(name);
+    std::fs::read_to_string(path).unwrap()
+}
+
+fn greenshift() -> Command {
+    Command::cargo_bin("greenshift").expect("binary builds")
+}
+
+/// `xml` without any `<tag ...>...</tag>` element.
+fn without(xml: &str, tag: &str) -> String {
+    let (open, close) = (format!("<{tag} "), format!("</{tag}>"));
+    let mut out = xml.to_owned();
+    while let Some(start) = out.find(&open) {
+        let end = start + out[start..].find(&close).unwrap() + close.len();
+        out.replace_range(start..end, "");
+    }
+    out
+}
+
+struct History {
+    dir: tempfile::TempDir,
+    db: PathBuf,
+    runs: usize,
+}
+
+impl History {
+    fn new() -> History {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("history.sqlite");
+        History { dir, db, runs: 0 }
+    }
+
+    fn ingest(&mut self, xml: &str, source: &str) {
+        self.runs += 1;
+        let file = self.dir.path().join(format!("run{}.xml", self.runs));
+        std::fs::write(&file, xml).unwrap();
+        greenshift()
+            .arg("ingest")
+            .arg("--db")
+            .arg(&self.db)
+            .args(["--source", source])
+            .arg(&file)
+            .assert()
+            .success();
+    }
+
+    fn select(&self, args: &[&str]) -> assert_cmd::assert::Assert {
+        greenshift()
+            .arg("select")
+            .arg("--db")
+            .arg(&self.db)
+            .args(args)
+            .assert()
+    }
+}
+
+/// Four nextest runs: as recorded (a failure and an error), green, the
+/// error alone, green; then one vaelii run.
+fn history() -> History {
+    let nextest = fixture("nextest.xml");
+    let green = without(&without(&nextest, "failure"), "error");
+    let error_only = without(&nextest, "failure");
+    let mut h = History::new();
+    h.ingest(&nextest, "nextest");
+    h.ingest(&green, "nextest");
+    h.ingest(&error_only, "nextest");
+    h.ingest(&green, "nextest");
+    h.ingest(&fixture("vaelii-run-vars.xml"), "vaelii");
+    h
+}
+
+fn stdout(assert: &assert_cmd::assert::Assert) -> String {
+    String::from_utf8(assert.get_output().stdout.clone()).unwrap()
+}
+
+fn stderr(assert: &assert_cmd::assert::Assert) -> String {
+    String::from_utf8(assert.get_output().stderr.clone()).unwrap()
+}
+
+#[test]
+fn selects_from_one_source() {
+    let h = history();
+    let before = std::fs::read(&h.db).unwrap();
+    let out = h
+        .select(&["--source", "nextest", "--min-runs", "4"])
+        .success();
+    // Rows: run 1 (cog and gearbox), run 3 (gearbox); runs 2 and 4 are
+    // green. The 12 ms cog goes before the 1457 ms gearbox.
+    assert_eq!(
+        stdout(&out),
+        "rich\t50.0\t66.7\tsprocket-works\twidgets::rejects_a_bent_cog\n\
+         rich\t100.0\t100.0\tsprocket-works::assembly\tassembles_a_gearbox\n\
+         poor\t100.0\t100.0\tsprocket-works\twidgets::needs_a_lathe\n\
+         poor\t100.0\t100.0\tsprocket-works::assembly\tlists_parts\n\
+         poor\t100.0\t100.0\tsprocket-works\twidgets::parses_a_sprocket\n\
+         poor\t100.0\t100.0\tsprocket-works\twidgets::spins_eventually\n"
+    );
+    assert_eq!(stderr(&out), "");
+    assert_eq!(
+        std::fs::read(&h.db).unwrap(),
+        before,
+        "select wrote to the store"
+    );
+    // Each nextest test has 4 results: with 5 needed, only rich is listed.
+    let out = h
+        .select(&["--source", "nextest", "--min-runs", "5"])
+        .success();
+    assert_eq!(stdout(&out).lines().count(), 2);
+}
+
+#[test]
+fn selects_from_every_source_by_default() {
+    let h = history();
+    // The vaelii run is the newest full run, so its tests are the universe;
+    // it is the only run any of them failed in. fixtures at 0 ms covers it.
+    let out = h.select(&["--min-runs", "1"]).success();
+    assert_eq!(
+        stdout(&out),
+        "rich\t100.0\t100.0\twidgets.flywheel-test\tfixtures\n\
+         poor\t100.0\t100.0\tghost-gate\tunknown-var\n\
+         poor\t100.0\t100.0\twidgets.flywheel-test\tstores-momentum\n\
+         poor\t100.0\t100.0\twidgets.sprocket-test\tcounts-teeth\n\
+         poor\t100.0\t100.0\twidgets.sprocket-test\tparses-a-sprocket\n\
+         poor\t100.0\t100.0\twidgets.sprocket-test\trejects-a-bent-cog\n\
+         poor\t100.0\t100.0\twidgets.sprocket-test\tspins-under-load\n"
+    );
+    // With the default --min-runs of 120, every test here is new.
+    let out = h.select(&[]).success();
+    assert_eq!(
+        stdout(&out),
+        "rich\t100.0\t100.0\twidgets.flywheel-test\tfixtures\n"
+    );
+}
+
+#[test]
+fn confidence_ends_rich_early() {
+    let h = history();
+    let out = h
+        .select(&[
+            "--source",
+            "nextest",
+            "--min-runs",
+            "4",
+            "--confidence",
+            "60",
+        ])
+        .success();
+    assert_eq!(
+        stdout(&out),
+        "rich\t50.0\t66.7\tsprocket-works\twidgets::rejects_a_bent_cog\n\
+         poor\t100.0\t100.0\tsprocket-works\twidgets::needs_a_lathe\n\
+         poor\t100.0\t100.0\tsprocket-works::assembly\tlists_parts\n\
+         poor\t100.0\t100.0\tsprocket-works\twidgets::parses_a_sprocket\n\
+         poor\t100.0\t100.0\tsprocket-works\twidgets::spins_eventually\n\
+         poor\t100.0\t100.0\tsprocket-works::assembly\tassembles_a_gearbox\n"
+    );
+    assert_eq!(stderr(&out), "");
+}
+
+#[test]
+fn an_unreached_confidence_keeps_the_whole_cover_and_says_so() {
+    let h = history();
+    let out = h
+        .select(&[
+            "--source",
+            "nextest",
+            "--min-runs",
+            "5",
+            "--confidence",
+            "99",
+            "--estimator",
+            "smoothed",
+        ])
+        .success();
+    // G = 2: (2 + 1) / (2 + 1 + 2), then (2 + 1) / (2 + 0 + 2).
+    assert_eq!(
+        stdout(&out),
+        "rich\t50.0\t60.0\tsprocket-works\twidgets::rejects_a_bent_cog\n\
+         rich\t100.0\t75.0\tsprocket-works::assembly\tassembles_a_gearbox\n"
+    );
+    assert_eq!(
+        stderr(&out),
+        "greenshift: confidence 99% not reached; the highest is 75.0%\n"
+    );
+}
+
+#[test]
+fn no_full_run_exits_2() {
+    let h = history();
+    let out = h.select(&["--source", "elsewhere"]).code(2);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(stderr(&out), "no history: run the full suite\n");
+
+    // No store at all: the same, and nothing is created.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("sub/history.sqlite");
+    let out = greenshift()
+        .arg("select")
+        .arg("--db")
+        .arg(&db)
+        .assert()
+        .code(2);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(stderr(&out), "no history: run the full suite\n");
+    assert!(!dir.path().join("sub").exists());
+}
+
+#[test]
+fn a_file_that_is_not_a_store_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("notes.sqlite");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch("CREATE TABLE notes (body TEXT);")
+        .unwrap();
+    drop(conn);
+    let out = greenshift()
+        .arg("select")
+        .arg("--db")
+        .arg(&db)
+        .assert()
+        .code(1);
+    assert!(
+        stderr(&out).contains("not a greenshift history store"),
+        "{}",
+        stderr(&out)
+    );
+}
