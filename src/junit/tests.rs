@@ -430,3 +430,28 @@ fn a_processing_instruction_after_the_root_is_fine() {
     let c = one(r#"<testsuite name="s"><testcase name="t"/></testsuite><?some-pi data?>"#);
     assert_eq!(c.name, "t");
 }
+
+#[test]
+fn attribute_and_reference_errors_report_where_they_are() {
+    // Each bad construct starts at the same byte, past the first line, so
+    // an error that reports byte 0 (or anything else) is caught.
+    let head = "<testsuite name=\"s\">\n<testcase name=\"a\"/>\n";
+    let at = head.len() as u64;
+    for (bad, starts_at) in [
+        (r#"<testcase name="t" name="u"/>"#, at),
+        (r#"<testcase name="t" foo/>"#, at),
+        (r#"<testcase name="t&bogus;"/>"#, at),
+        // The reference itself starts after `<testcase name="t"><failure>`.
+        (
+            r#"<testcase name="t"><failure>&bogus;</failure></testcase>"#,
+            at + r#"<testcase name="t"><failure>"#.len() as u64,
+        ),
+    ] {
+        let xml = format!("{head}{bad}</testsuite>");
+        let err = parse_str(&xml).unwrap_err();
+        assert!(
+            matches!(err, JunitError::Xml { position, .. } if position == starts_at),
+            "{bad}: {err:?}"
+        );
+    }
+}

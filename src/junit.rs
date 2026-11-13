@@ -158,8 +158,11 @@ impl CaseBuilder {
 /// Failure and error text is not kept: only which elements are present.
 pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
     let mut reader = Reader::from_str(xml);
-    let xml_err = |reader: &Reader<&[u8]>, source: quick_xml::Error| JunitError::Xml {
-        position: reader.error_position(),
+    // `position` is where the reader failed for errors from `read_event`,
+    // and the start of the event being examined for errors found after it
+    // (in attributes or references): the reader has no position for those.
+    let xml_err = |position: u64, source: quick_xml::Error| JunitError::Xml {
+        position,
         message: source.to_string(),
     };
 
@@ -173,7 +176,9 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
 
     loop {
         let position = reader.buffer_position();
-        let event = reader.read_event().map_err(|e| xml_err(&reader, e))?;
+        let event = reader
+            .read_event()
+            .map_err(|e| xml_err(reader.error_position(), e))?;
         match event {
             Event::Start(ref e) | Event::Empty(ref e) => {
                 let empty = matches!(event, Event::Empty(_));
@@ -198,14 +203,14 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
                 match (tag, case.as_mut()) {
                     (b"testsuite", None) => {
                         if !empty {
-                            let name = attr(e, b"name").map_err(|s| xml_err(&reader, s))?;
+                            let name = attr(e, b"name").map_err(|s| xml_err(position, s))?;
                             suites.push((at, name.unwrap_or_default()));
                         }
                     }
                     (b"testcase", None) => {
                         let builder =
                             start_case(e, &suites, position).map_err(|err| match err {
-                                StartCaseError::Xml(s) => xml_err(&reader, s),
+                                StartCaseError::Xml(s) => xml_err(position, s),
                                 StartCaseError::Junit(j) => j,
                             })?;
                         if empty {
@@ -234,7 +239,7 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
                     return Err(JunitError::OutsideRoot { position });
                 }
                 // Text is not kept, but an undefined entity is still malformed XML.
-                check_ref(&r).map_err(|e| xml_err(&reader, e))?;
+                check_ref(&r).map_err(|e| xml_err(position, e))?;
             }
             Event::Text(t) if depth == 0 && !t.iter().all(u8::is_ascii_whitespace) => {
                 return Err(JunitError::OutsideRoot { position });
