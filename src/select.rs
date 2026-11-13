@@ -326,6 +326,25 @@ fn better(tests: &[TestInfo], fails: &[u64], a: usize, b: usize) -> Ordering {
         .then_with(|| ta.name.as_raw().cmp(tb.name.as_raw()))
 }
 
+/// The coverage after each pick of the cover, as a percentage of the
+/// matrix rows. It is exactly 100 only once no row is left, however close
+/// to it a pick before comes.
+pub fn cover_coverages(analysis: &Analysis) -> Vec<f64> {
+    let rows = analysis.rows;
+    analysis
+        .cover
+        .iter()
+        .map(|pick| {
+            if pick.rows_left == 0 {
+                100.0
+            } else {
+                let caught = 100.0 * (rows - pick.rows_left) as f64 / rows as f64;
+                caught.min(100f64.next_down())
+            }
+        })
+        .collect()
+}
+
 /// The confidence after each pick of the cover, as a percentage.
 pub fn cover_confidences(analysis: &Analysis, estimator: &dyn Estimator) -> Vec<f64> {
     analysis
@@ -335,40 +354,105 @@ pub fn cover_confidences(analysis: &Analysis, estimator: &dyn Estimator) -> Vec<
         .collect()
 }
 
-/// How much of the cover is rich.
+/// A number a split can be decided on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Measure {
+    Coverage,
+    Confidence,
+}
+
+impl fmt::Display for Measure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Measure::Coverage => "coverage",
+            Measure::Confidence => "confidence",
+        })
+    }
+}
+
+/// The percentages rich has to reach. With neither, rich has to reach
+/// 100% coverage: the whole cover.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Thresholds {
+    pub coverage: Option<f64>,
+    pub confidence: Option<f64>,
+}
+
+/// A threshold no prefix of the cover reached.
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Unreached {
+    pub measure: Measure,
+    /// The threshold, a percentage.
+    pub wanted: f64,
+    /// The highest the cover reached, a percentage.
+    pub highest: f64,
+}
+
+/// How much of the cover is rich.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Split {
     /// The length of the rich prefix of the cover.
     pub rich: usize,
-    /// When the threshold was given and no prefix reached it, the highest
-    /// confidence (a percentage) that one did.
-    pub unreached: Option<f64>,
+    /// The thresholds that were never reached, coverage first.
+    pub unreached: Vec<Unreached>,
 }
 
-/// Decide the rich prefix of a cover whose confidences, as percentages in
-/// pick order, are `confidences`. With no `threshold` the whole cover is
-/// rich. Otherwise rich ends at the first pick whose confidence is at
-/// least `threshold`; when none is, the whole cover is rich and
-/// [`Split::unreached`] says the highest confidence. An empty cover has
-/// nothing to split.
-pub fn split(confidences: &[f64], threshold: Option<f64>) -> Split {
-    let whole = Split {
-        rich: confidences.len(),
-        unreached: None,
-    };
-    let Some(threshold) = threshold else {
-        return whole;
-    };
-    match confidences.iter().position(|&c| c >= threshold) {
-        Some(i) => Split {
-            rich: i + 1,
-            unreached: None,
-        },
-        None => Split {
-            unreached: confidences.iter().copied().reduce(f64::max),
-            ..whole
-        },
+/// Decide the rich prefix of a cover from its per-pick `coverage` and
+/// `confidence` percentages, in pick order.
+///
+/// For each threshold given, find the first pick at or over it. Rich ends
+/// at the pick `rich_len` chooses from those. If any threshold is never
+/// reached, the whole cover is rich and [`Split::unreached`] says which and
+/// how high it got. An empty cover has nothing to split.
+pub fn split(coverage: &[f64], confidence: &[f64], thresholds: Thresholds) -> Split {
+    if coverage.is_empty() {
+        return Split {
+            rich: 0,
+            unreached: Vec::new(),
+        };
     }
+    let wanted = match thresholds {
+        Thresholds {
+            coverage: None,
+            confidence: None,
+        } => Thresholds {
+            coverage: Some(100.0),
+            confidence: None,
+        },
+        given => given,
+    };
+    let mut firsts = Vec::new();
+    let mut unreached = Vec::new();
+    for (measure, values, threshold) in [
+        (Measure::Coverage, coverage, wanted.coverage),
+        (Measure::Confidence, confidence, wanted.confidence),
+    ] {
+        let Some(threshold) = threshold else {
+            continue;
+        };
+        match values.iter().position(|&v| v >= threshold) {
+            Some(i) => firsts.push(i),
+            None => unreached.push(Unreached {
+                measure,
+                wanted: threshold,
+                highest: values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            }),
+        }
+    }
+    let rich = if unreached.is_empty() {
+        rich_len(&firsts)
+    } else {
+        coverage.len()
+    };
+    Split { rich, unreached }
+}
+
+/// The rich length when every threshold is reached and `firsts` are the
+/// indices of the first picks reaching each: rich must reach all of them,
+/// so the one reached last decides, and rich is never shorter than any
+/// threshold alone would make it.
+fn rich_len(firsts: &[usize]) -> usize {
+    firsts.iter().max().map_or(0, |&last| last + 1)
 }
 
 /// Whether a line's test is to run first or after.
@@ -419,7 +503,6 @@ pub fn lines<'a>(
     rich: usize,
     min_runs: u64,
 ) -> Vec<Line<'a>> {
-    let rows = analysis.rows;
     let line = |class, coverage, confidence, test: &'a TestInfo| Line {
         class,
         coverage,
@@ -429,13 +512,13 @@ pub fn lines<'a>(
     };
     let mut out: Vec<Line<'a>> = analysis.cover[..rich]
         .iter()
-        .map(|pick| {
-            let caught = 100.0 * (rows - pick.rows_left) as f64 / rows as f64;
+        .zip(cover_coverages(analysis))
+        .map(|(pick, coverage)| {
             // Only a cover with no row left prints as 100.0.
             let coverage = if pick.rows_left > 0 {
-                caught.min(99.9)
+                coverage.min(99.9)
             } else {
-                100.0
+                coverage
             };
             let confidence = 100.0 * estimator.p_green(analysis.green, pick.rows_left);
             line(

@@ -57,7 +57,8 @@ the common `<testsuites>/<testsuite>/<testcase>` shape should work.
 
 ```
 greenshift select [--db PATH] [--source NAME]... [--min-runs N]
-                  [--confidence N] [--estimator wilson|empirical|smoothed]
+                  [--coverage N] [--confidence N]
+                  [--estimator wilson|empirical|smoothed]
 ```
 
 `select` reads the store and writes nothing. It sorts the tests of your
@@ -110,11 +111,15 @@ class	coverage	confidence	suite	name
 - `suite` and `name`: as stored, with control characters, tabs and
   backslashes escaped as in Rust's `{:?}`, so each test is one line.
 
-With `--confidence N` (a percentage from 0 to 100), rich ends at the first
-test whose confidence is at least N, and the rest of the picked tests are
+By default rich is every picked test. `--coverage N` and `--confidence N`
+(percentages from 0 to 100) end rich early, at the first picked test whose
+coverage or confidence is at least N; the rest of the picked tests are then
 treated like any other non-rich test: poor with enough results, otherwise
-new. If no test reaches N, rich is all the picked tests and stderr says the
-highest confidence reached.
+new. With neither flag, rich behaves as with `--coverage 100`. With both,
+rich ends at the first test where both hold, so it is never shorter than
+either flag alone would make it. If a threshold is never reached, rich is
+all the picked tests and stderr names the threshold and the highest value
+reached.
 
 Exit status:
 

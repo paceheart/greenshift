@@ -132,17 +132,21 @@ fn analysis(store: &Store, sources: &[&str]) -> Option<Analysis> {
     analyse(&store.history(&sources).unwrap())
 }
 
-/// What `select` prints, and the highest confidence when `threshold` was
-/// not reached; `None` for no history.
+/// What `select` prints, and the thresholds not reached; `None` for no
+/// history.
 fn select(
     store: &Store,
     sources: &[&str],
     estimator: &dyn Estimator,
-    threshold: Option<f64>,
+    thresholds: Thresholds,
     min_runs: u64,
-) -> Option<(Vec<String>, Option<f64>)> {
+) -> Option<(Vec<String>, Vec<Unreached>)> {
     let analysis = analysis(store, sources)?;
-    let decided = split(&cover_confidences(&analysis, estimator), threshold);
+    let decided = split(
+        &cover_coverages(&analysis),
+        &cover_confidences(&analysis, estimator),
+        thresholds,
+    );
     let lines = lines(&analysis, estimator, decided.rich, min_runs)
         .iter()
         .map(|l| l.to_string())
@@ -150,9 +154,35 @@ fn select(
     Some((lines, decided.unreached))
 }
 
+const DEFAULT: Thresholds = Thresholds {
+    coverage: None,
+    confidence: None,
+};
+
+fn confidence(n: f64) -> Thresholds {
+    Thresholds {
+        confidence: Some(n),
+        ..DEFAULT
+    }
+}
+
+fn coverage(n: f64) -> Thresholds {
+    Thresholds {
+        coverage: Some(n),
+        ..DEFAULT
+    }
+}
+
+fn both(coverage: f64, confidence: f64) -> Thresholds {
+    Thresholds {
+        coverage: Some(coverage),
+        confidence: Some(confidence),
+    }
+}
+
 /// `select` with the defaults but `min_runs`.
 fn out(store: &Store, min_runs: u64) -> Vec<String> {
-    select(store, &[], &Empirical, None, min_runs).unwrap().0
+    select(store, &[], &Empirical, DEFAULT, min_runs).unwrap().0
 }
 
 /// The names on rich lines, in order.
@@ -259,7 +289,7 @@ fn a_skip_is_neither_a_pass_nor_a_failure() {
     ]);
     // z has one pass to a's two, so it fails more often per run and is
     // picked though "a" sorts first; that covers the only row.
-    let (lines, _) = select(&store, &[], &Smoothed, None, 0).unwrap();
+    let (lines, _) = select(&store, &[], &Smoothed, DEFAULT, 0).unwrap();
     // The run where z was skipped is green: G = 2, so (2 + 1) / (2 + 2).
     assert_eq!(
         lines,
@@ -480,7 +510,7 @@ fn source_keeps_only_the_given_sources_runs() {
     record(&mut store, "ci", &[t("a", P, 10), t("b", P, 10)]);
     record(&mut store, "local", &[t("a", P, 10), t("b", P, 10)]);
     let rich_from = |sources: &[&str]| {
-        let (lines, _) = select(&store, sources, &Empirical, None, 0).unwrap();
+        let (lines, _) = select(&store, sources, &Empirical, DEFAULT, 0).unwrap();
         rich(&lines)
             .iter()
             .map(|s| s.to_string())
@@ -499,7 +529,7 @@ fn fullness_is_judged_among_the_chosen_sources_runs() {
     record(&mut store, "small", &[t("a", F, 10), t("b", P, 10)]);
     // Against the big run the small one is short.
     assert_eq!(rich(&out(&store, 0)), Vec::<&str>::new());
-    let (lines, _) = select(&store, &["small"], &Empirical, None, 0).unwrap();
+    let (lines, _) = select(&store, &["small"], &Empirical, DEFAULT, 0).unwrap();
     assert_eq!(rich(&lines), ["a"]);
 }
 
@@ -512,86 +542,165 @@ fn suite_and_name_are_printed_escaped() {
     );
 }
 
+/// A cover of four picks: coverage and confidence after each.
+const COV: [f64; 4] = [40.0, 70.0, 90.0, 100.0];
+const CONF: [f64; 4] = [50.0, 80.0, 85.0, 95.0];
+
+fn rich_at(thresholds: Thresholds) -> usize {
+    let decided = split(&COV, &CONF, thresholds);
+    assert_eq!(decided.unreached, [], "{thresholds:?}");
+    decided.rich
+}
+
 #[test]
 fn split_without_a_threshold_is_the_whole_cover() {
-    assert_eq!(
-        split(&[50.0, 80.0, 100.0], None),
-        Split {
-            rich: 3,
-            unreached: None
-        }
-    );
+    assert_eq!(rich_at(DEFAULT), 4);
+    assert_eq!(rich_at(DEFAULT), rich_at(coverage(100.0)));
 }
 
 #[test]
-fn split_ends_rich_at_the_first_pick_at_or_over_the_threshold() {
-    let c = [50.0, 80.0, 95.0, 100.0];
-    let rich_at = |n| split(&c, Some(n));
+fn split_ends_rich_at_the_first_pick_at_or_over_the_coverage() {
+    assert_eq!(rich_at(coverage(70.0)), 2);
+    assert_eq!(rich_at(coverage(69.9)), 2);
+    assert_eq!(rich_at(coverage(70.1)), 3);
+    assert_eq!(rich_at(coverage(0.0)), 1);
+    assert_eq!(rich_at(coverage(100.0)), 4);
+}
+
+#[test]
+fn split_ends_rich_at_the_first_pick_at_or_over_the_confidence() {
+    assert_eq!(rich_at(confidence(80.0)), 2);
+    assert_eq!(rich_at(confidence(79.9)), 2);
+    assert_eq!(rich_at(confidence(80.1)), 3);
+    assert_eq!(rich_at(confidence(0.0)), 1);
+    assert_eq!(rich_at(confidence(95.0)), 4);
+}
+
+#[test]
+fn split_with_both_thresholds_ends_where_the_later_is_reached() {
+    // Coverage is reached later.
+    assert_eq!(rich_at(both(90.0, 50.0)), 3);
+    // Confidence is reached later.
+    assert_eq!(rich_at(both(40.0, 85.0)), 3);
+    // Both at the same pick.
+    assert_eq!(rich_at(both(70.0, 80.0)), 2);
+    // Never fewer than either alone.
+    for (cov, conf) in [(40.0, 95.0), (100.0, 0.0), (60.0, 81.0)] {
+        let r = rich_at(both(cov, conf));
+        assert!(r >= rich_at(coverage(cov)) && r >= rich_at(confidence(conf)));
+    }
+}
+
+#[test]
+fn split_that_never_reaches_the_confidence_is_the_whole_cover() {
     assert_eq!(
-        rich_at(80.0),
-        Split {
-            rich: 2,
-            unreached: None
-        }
-    );
-    assert_eq!(
-        rich_at(79.9),
-        Split {
-            rich: 2,
-            unreached: None
-        }
-    );
-    assert_eq!(
-        rich_at(80.1),
-        Split {
-            rich: 3,
-            unreached: None
-        }
-    );
-    assert_eq!(
-        rich_at(0.0),
-        Split {
-            rich: 1,
-            unreached: None
-        }
-    );
-    assert_eq!(
-        rich_at(100.0),
+        split(&COV, &CONF, confidence(99.0)),
         Split {
             rich: 4,
-            unreached: None
+            unreached: vec![Unreached {
+                measure: Measure::Confidence,
+                wanted: 99.0,
+                highest: 95.0
+            }]
         }
     );
+    // With a coverage that is reached, still the whole cover.
+    let decided = split(&COV, &CONF, both(40.0, 99.0));
+    assert_eq!(decided.rich, 4);
+    assert_eq!(decided.unreached.len(), 1);
+    assert_eq!(decided.unreached[0].measure, Measure::Confidence);
 }
 
 #[test]
-fn split_that_never_reaches_the_threshold_is_the_whole_cover() {
+fn split_that_never_reaches_the_coverage_is_the_whole_cover() {
+    // A real cover always ends at 100% coverage; split does not rely on it.
+    let short = [40.0, 70.0];
+    let decided = split(&short, &CONF[..2], both(90.0, 99.0));
     assert_eq!(
-        split(&[40.0, 60.0, 75.0], Some(90.0)),
+        decided,
         Split {
-            rich: 3,
-            unreached: Some(75.0)
+            rich: 2,
+            unreached: vec![
+                Unreached {
+                    measure: Measure::Coverage,
+                    wanted: 90.0,
+                    highest: 70.0
+                },
+                Unreached {
+                    measure: Measure::Confidence,
+                    wanted: 99.0,
+                    highest: 80.0
+                },
+            ]
         }
     );
+    let decided = split(&short, &CONF[..2], coverage(90.0));
+    assert_eq!((decided.rich, decided.unreached.len()), (2, 1));
+}
+
+#[test]
+fn an_empty_cover_has_nothing_to_split() {
+    for thresholds in [DEFAULT, coverage(50.0), confidence(99.0), both(1.0, 1.0)] {
+        assert_eq!(
+            split(&[], &[], thresholds),
+            Split {
+                rich: 0,
+                unreached: vec![]
+            }
+        );
+    }
+}
+
+#[test]
+fn coverage_is_exactly_100_only_with_no_row_left() {
+    // As in the_cover_stops_at_exact_coverage...: 2000 of 2001 rows first.
+    let mut runs = vec![vec![t("a", F, 10), t("b", P, 10)]; 2000];
+    runs.push(vec![t("a", P, 10), t("b", F, 10)]);
+    let store = store_of(&runs);
+    let a = analysis(&store, &[]).unwrap();
+    let c = cover_coverages(&a);
+    assert_eq!(c.len(), 2);
+    assert!(c[0] < 100.0 && c[0] > 99.95, "{c:?}");
+    assert_eq!(c[1], 100.0);
+    let decided = split(&c, &cover_confidences(&a, &Empirical), coverage(100.0));
+    assert_eq!(decided.rich, 2);
+    let decided = split(&c, &cover_confidences(&a, &Empirical), coverage(99.95));
+    assert_eq!(decided.rich, 1);
+}
+
+#[test]
+fn coverage_ends_rich_early() {
+    let store = store_of(&[
+        vec![t("x", F, 10), t("y", F, 10), t("z", P, 10)],
+        vec![t("x", F, 10), t("y", F, 10), t("z", P, 10)],
+        vec![t("x", F, 10), t("y", P, 10), t("z", P, 10)],
+        vec![t("x", P, 10), t("y", P, 10), t("z", F, 10)],
+        vec![t("x", P, 10), t("y", P, 10), t("z", P, 10)],
+    ]);
+    // x covers 75% of the rows; z, now poor, sorts by median with y.
+    let (lines, unreached) = select(&store, &[], &Empirical, coverage(75.0), 5).unwrap();
     assert_eq!(
-        split(&[], Some(90.0)),
-        Split {
-            rich: 0,
-            unreached: None
-        }
+        lines,
+        [
+            "rich\t75.0\t50.0\ts\tx",
+            "poor\t100.0\t100.0\ts\ty",
+            "poor\t100.0\t100.0\ts\tz",
+        ]
     );
+    assert_eq!(unreached, []);
+    let (lines, _) = select(&store, &[], &Empirical, coverage(75.1), 5).unwrap();
+    assert_eq!(rich(&lines), ["x", "z"]);
 }
 
 #[test]
 fn smoothed_confidence_can_leave_a_threshold_unreached() {
     let store = store_of(&[vec![t("a", F, 10)], vec![t("a", P, 10)]]);
     // G = 1, so the most smoothed reaches is (1 + 1) / (1 + 0 + 2).
-    let (lines, unreached) = select(&store, &[], &Smoothed, Some(99.0), 0).unwrap();
+    let (lines, unreached) = select(&store, &[], &Smoothed, confidence(99.0), 0).unwrap();
     assert_eq!(lines, ["rich\t100.0\t66.7\ts\ta"]);
-    assert_eq!(
-        unreached.map(|c| format!("{c:.1}")).as_deref(),
-        Some("66.7")
-    );
+    assert_eq!(unreached.len(), 1);
+    assert_eq!(unreached[0].measure, Measure::Confidence);
+    assert_eq!(format!("{:.1}", unreached[0].highest), "66.7");
 }
 
 #[test]
@@ -606,13 +715,13 @@ fn the_cover_after_the_split_is_poor_or_new() {
         vec![t("x", P, 10), t("y", P, 10), t("z", P, 5)],
         vec![t("y", P, 10)],
     ]);
-    let run = |threshold, min_runs| {
-        select(&store, &[], &Empirical, threshold, min_runs)
+    let run = |thresholds, min_runs| {
+        select(&store, &[], &Empirical, thresholds, min_runs)
             .unwrap()
             .0
     };
     assert_eq!(
-        run(None, 5),
+        run(DEFAULT, 5),
         [
             "rich\t75.0\t50.0\ts\tx",
             "rich\t100.0\t100.0\ts\tz",
@@ -621,7 +730,7 @@ fn the_cover_after_the_split_is_poor_or_new() {
     );
     // x alone reaches 50%: z joins the poor, by median.
     assert_eq!(
-        run(Some(50.0), 5),
+        run(confidence(50.0), 5),
         [
             "rich\t75.0\t50.0\ts\tx",
             "poor\t100.0\t100.0\ts\tz",
@@ -630,7 +739,7 @@ fn the_cover_after_the_split_is_poor_or_new() {
     );
     // With 6 results needed, z (5) is new and y (6) still poor.
     assert_eq!(
-        run(Some(50.0), 6),
+        run(confidence(50.0), 6),
         ["rich\t75.0\t50.0\ts\tx", "poor\t100.0\t100.0\ts\ty"]
     );
 }

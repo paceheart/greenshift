@@ -9,7 +9,7 @@ use clap::builder::NonEmptyStringValueParser;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::junit;
-use crate::select::{self, Empirical, Estimator, Smoothed, Wilson};
+use crate::select::{self, Empirical, Estimator, Smoothed, Thresholds, Wilson};
 use crate::store::{self, NewRun, Store};
 
 /// Pick which tests to run from what your tests have done before.
@@ -67,8 +67,14 @@ pub struct SelectArgs {
     #[arg(long, value_name = "N", default_value_t = 120)]
     pub min_runs: u64,
 
+    /// End rich at the first test whose coverage reaches this percentage
+    /// (0 to 100). Default: 100, the whole cover, unless --confidence is
+    /// given.
+    #[arg(long, value_name = "N", value_parser = percentage)]
+    pub coverage: Option<f64>,
+
     /// End rich at the first test whose confidence reaches this percentage
-    /// (0 to 100). Default: rich is the whole cover.
+    /// (0 to 100). With --coverage too, rich ends where both are reached.
     #[arg(long, value_name = "N", value_parser = percentage)]
     pub confidence: Option<f64>,
 
@@ -160,16 +166,23 @@ pub fn select(args: &SelectArgs) -> anyhow::Result<ExitCode> {
     };
     let estimator = args.estimator.estimator();
     let decided = select::split(
+        &select::cover_coverages(&analysis),
         &select::cover_confidences(&analysis, estimator),
-        args.confidence,
+        Thresholds {
+            coverage: args.coverage,
+            confidence: args.confidence,
+        },
     );
     let mut out = std::io::stdout().lock();
     for line in select::lines(&analysis, estimator, decided.rich, args.min_runs) {
         writeln!(out, "{line}")?;
     }
     out.flush()?;
-    if let (Some(highest), Some(wanted)) = (decided.unreached, args.confidence) {
-        eprintln!("greenshift: confidence {wanted}% not reached; the highest is {highest:.1}%");
+    for missed in decided.unreached {
+        eprintln!(
+            "greenshift: {} {}% not reached; the highest is {:.1}%",
+            missed.measure, missed.wanted, missed.highest
+        );
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -239,6 +252,7 @@ mod tests {
         assert_eq!(args.db, PathBuf::from(".greenshift/history.sqlite"));
         assert_eq!(args.source, Vec::<String>::new());
         assert_eq!(args.min_runs, 120);
+        assert_eq!(args.coverage, None);
         assert_eq!(args.confidence, None);
         assert_eq!(args.estimator, EstimatorKind::Wilson);
     }
@@ -254,6 +268,8 @@ mod tests {
             "nightly",
             "--min-runs",
             "7",
+            "--coverage",
+            "90",
             "--confidence",
             "99.5",
             "--estimator",
@@ -263,6 +279,7 @@ mod tests {
         assert_eq!(args.db, PathBuf::from("h.sqlite"));
         assert_eq!(args.source, ["ci", "nightly"]);
         assert_eq!(args.min_runs, 7);
+        assert_eq!(args.coverage, Some(90.0));
         assert_eq!(args.confidence, Some(99.5));
         assert_eq!(args.estimator, EstimatorKind::Smoothed);
         for (name, kind) in [
@@ -274,12 +291,14 @@ mod tests {
     }
 
     #[test]
-    fn select_confidence_is_a_percentage() {
-        for ok in ["0", "100", "50.25"] {
-            assert!(select_args(&["--confidence", ok]).is_ok(), "{ok}");
-        }
-        for bad in ["-1", "100.1", "NaN", "inf", "high", ""] {
-            assert!(select_args(&["--confidence", bad]).is_err(), "{bad}");
+    fn select_thresholds_are_percentages() {
+        for flag in ["--coverage", "--confidence"] {
+            for ok in ["0", "100", "50.25"] {
+                assert!(select_args(&[flag, ok]).is_ok(), "{flag} {ok}");
+            }
+            for bad in ["-1", "100.1", "NaN", "inf", "high", ""] {
+                assert!(select_args(&[flag, bad]).is_err(), "{flag} {bad}");
+            }
         }
     }
 

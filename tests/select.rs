@@ -202,6 +202,67 @@ fn an_unreached_confidence_keeps_the_whole_cover_and_says_so() {
 }
 
 #[test]
+fn coverage_ends_rich_early() {
+    let h = history();
+    let out = h
+        .select(&["--source", "nextest", "--min-runs", "4", "--coverage", "50"])
+        .success();
+    assert_eq!(
+        stdout(&out),
+        "rich\t50.0\t20.8\tsprocket-works\twidgets::rejects_a_bent_cog\n\
+         poor\t100.0\t34.2\tsprocket-works\twidgets::needs_a_lathe\n\
+         poor\t100.0\t34.2\tsprocket-works::assembly\tlists_parts\n\
+         poor\t100.0\t34.2\tsprocket-works\twidgets::parses_a_sprocket\n\
+         poor\t100.0\t34.2\tsprocket-works\twidgets::spins_eventually\n\
+         poor\t100.0\t34.2\tsprocket-works::assembly\tassembles_a_gearbox\n"
+    );
+    assert_eq!(stderr(&out), "");
+}
+
+#[test]
+fn with_both_thresholds_rich_ends_where_the_later_is_reached() {
+    let h = history();
+    // 50% coverage comes at the first pick, 30% confidence at the second.
+    let out = h
+        .select(&[
+            "--source",
+            "nextest",
+            "--min-runs",
+            "5",
+            "--coverage",
+            "50",
+            "--confidence",
+            "30",
+        ])
+        .success();
+    assert_eq!(
+        stdout(&out),
+        "rich\t50.0\t20.8\tsprocket-works\twidgets::rejects_a_bent_cog\n\
+         rich\t100.0\t34.2\tsprocket-works::assembly\tassembles_a_gearbox\n"
+    );
+    assert_eq!(stderr(&out), "");
+    // A confidence never reached keeps the whole cover, whatever the
+    // coverage, and stderr names it.
+    let out = h
+        .select(&[
+            "--source",
+            "nextest",
+            "--min-runs",
+            "5",
+            "--coverage",
+            "50",
+            "--confidence",
+            "50",
+        ])
+        .success();
+    assert_eq!(stdout(&out).lines().count(), 2);
+    assert_eq!(
+        stderr(&out),
+        "greenshift: confidence 50% not reached; the highest is 34.2%\n"
+    );
+}
+
+#[test]
 fn no_full_run_exits_2() {
     let h = history();
     let out = h.select(&["--source", "elsewhere"]).code(2);
