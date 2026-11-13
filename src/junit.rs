@@ -293,6 +293,61 @@ pub(crate) fn escape_file_text(text: &str) -> String {
     out
 }
 
+/// Text read from an input file, which may hold terminal control bytes.
+///
+/// `Display` writes it escaped, as [`escape_file_text`] does: control and
+/// invisible characters and backslash as `{:?}` would show them (an ESC
+/// prints as `\u{1b}`), quotes left alone. `Debug` escapes too. There is no
+/// `Deref<Target = str>` or `AsRef<str>`, so it cannot be passed where a
+/// `&str` is expected and printed raw by accident:
+///
+/// ```compile_fail
+/// let name = greenshift::junit::Tainted::from("\u{1b}[31mevil");
+/// let text: &str = &name;
+/// ```
+///
+/// ```compile_fail
+/// let name = greenshift::junit::Tainted::from("\u{1b}[31mevil");
+/// println!("{}", name.0);
+/// ```
+///
+/// The text itself is reachable only through [`Tainted::as_raw`], for
+/// where it goes to the store or is parsed, not to a terminal:
+///
+/// ```
+/// let name = greenshift::junit::Tainted::from("\u{1b}[31mevil");
+/// assert_eq!(name.to_string(), r"\u{1b}[31mevil");
+/// assert_eq!(name.as_raw(), "\u{1b}[31mevil");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct Tainted(String);
+
+impl Tainted {
+    /// The text exactly as read from the file, control bytes and all.
+    /// Never print it: format the `Tainted` itself instead.
+    pub fn as_raw(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for Tainted {
+    fn from(text: String) -> Tainted {
+        Tainted(text)
+    }
+}
+
+impl From<&str> for Tainted {
+    fn from(text: &str) -> Tainted {
+        Tainted(text.to_owned())
+    }
+}
+
+impl fmt::Display for Tainted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&escape_file_text(&self.0))
+    }
+}
+
 fn start_case(
     e: &BytesStart<'_>,
     suites: &[(usize, String)],
