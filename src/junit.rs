@@ -82,9 +82,11 @@ pub enum JunitError {
     NotUtf8,
     // quick-xml's own errors repeat their cause in both Display and
     // source(), so keep the text rather than chaining it. `xml_err` escapes
-    // the control characters in it, since it quotes text from the file.
+    // it as `{:?}` would, since it quotes text from the file.
     #[error("malformed XML at byte {position}: {message}")]
     Xml { position: u64, message: String },
+    #[error("malformed XML at byte {position}: unrecognized entity {name:?}")]
+    UnknownEntity { position: u64, name: String },
     #[error("not JUnit XML: root element is {0:?}, expected <testsuites> or <testsuite>")]
     WrongRoot(String),
     #[error("not JUnit XML: no root element")]
@@ -228,7 +230,7 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
                     return Err(JunitError::OutsideRoot { position });
                 }
                 // Text is not kept, but an undefined entity is still malformed XML.
-                check_ref(&r).map_err(|e| xml_err(position, e))?;
+                check_ref(&r, position)?;
             }
             Event::Text(t) if depth == 0 && !t.iter().all(u8::is_ascii_whitespace) => {
                 return Err(JunitError::OutsideRoot { position });
@@ -267,15 +269,16 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
 /// attributes or references): the reader has no position for those.
 ///
 /// quick-xml's messages quote text from the file (tag names, entity names)
-/// verbatim, so control characters in them are escaped, as `{:?}` does for
-/// the other variants, before they can reach a terminal.
+/// verbatim, so they are escaped as `{:?}` escapes the other variants'
+/// file text (control and invisible characters such as bidi overrides, and
+/// backslash), except that quotes are left alone, before they can reach a
+/// terminal.
 fn xml_err(position: u64, source: quick_xml::Error) -> JunitError {
     let mut message = String::new();
     for c in source.to_string().chars() {
-        if c.is_control() {
-            message.extend(c.escape_default());
-        } else {
-            message.push(c);
+        match c {
+            '"' | '\'' => message.push(c),
+            _ => message.extend(c.escape_debug()),
         }
     }
     JunitError::Xml { position, message }
@@ -340,16 +343,18 @@ fn attr(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>, quick_xml::Err
 }
 
 /// Check that a `&amp;`-style or `&#NN;`-style reference in text is defined.
-fn check_ref(r: &quick_xml::events::BytesRef<'_>) -> Result<(), quick_xml::Error> {
-    if r.resolve_char_ref()?.is_some() {
+fn check_ref(r: &quick_xml::events::BytesRef<'_>, position: u64) -> Result<(), JunitError> {
+    let xml = |source| xml_err(position, source);
+    if r.resolve_char_ref().map_err(xml)?.is_some() {
         return Ok(());
     }
-    let name = r.decode().map_err(quick_xml::Error::Encoding)?;
+    let name = r.decode().map_err(|e| xml(quick_xml::Error::Encoding(e)))?;
     match quick_xml::escape::resolve_predefined_entity(&name) {
         Some(_) => Ok(()),
-        None => Err(quick_xml::Error::Escape(
-            quick_xml::escape::EscapeError::UnrecognizedEntity(0..name.len(), name.into_owned()),
-        )),
+        None => Err(JunitError::UnknownEntity {
+            position,
+            name: name.into_owned(),
+        }),
     }
 }
 

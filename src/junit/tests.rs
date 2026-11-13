@@ -408,7 +408,12 @@ fn testcase_with_an_empty_name_is_also_an_error() {
 fn unknown_entity_is_an_error() {
     let err = parse_str(r#"<testsuite name="s"><testcase name="t"><failure>&bogus;</failure></testcase></testsuite>"#)
         .unwrap_err();
-    assert!(matches!(err, JunitError::Xml { .. }), "{err:?}");
+    assert!(
+        matches!(err, JunitError::UnknownEntity { ref name, .. } if name == "bogus"),
+        "{err:?}"
+    );
+    // The byte offset is the only position: no entity-relative range.
+    assert!(!err.to_string().contains("0..5"), "{err}");
 }
 
 #[test]
@@ -478,11 +483,28 @@ fn xml_errors_escape_control_bytes_quoted_from_the_file() {
         "<testsuites><testsuite name=\"&\u{1b}[31mevil;\"></testsuite></testsuites>",
     ] {
         let err = parse_str(xml).unwrap_err();
-        assert!(matches!(err, JunitError::Xml { .. }), "{err:?}");
+        assert!(
+            matches!(
+                err,
+                JunitError::Xml { .. } | JunitError::UnknownEntity { .. }
+            ),
+            "{err:?}"
+        );
         let text = err.to_string();
         assert!(!text.contains('\u{1b}'), "{text:?}");
-        assert!(text.contains("evil"), "{text:?}");
+        assert!(text.contains(r"\u{1b}[31mevil"), "{text:?}");
     }
+}
+
+#[test]
+fn xml_errors_escape_bidi_overrides_and_backslashes_like_debug() {
+    // A right-to-left override would visually reorder the error line, and a
+    // literal `\u{1b}` in the file must not print like an escaped ESC.
+    let err = parse_str("<testsuites></testsuites\u{202e}evil\\u{1b}>").unwrap_err();
+    assert!(matches!(err, JunitError::Xml { .. }), "{err:?}");
+    let text = err.to_string();
+    assert!(!text.contains('\u{202e}'), "{text:?}");
+    assert!(text.contains(r"\u{202e}evil\\u{1b}"), "{text:?}");
 }
 
 #[test]
@@ -567,7 +589,11 @@ fn attribute_and_reference_errors_report_where_they_are() {
         let xml = format!("{head}{bad}</testsuite>");
         let err = parse_str(&xml).unwrap_err();
         assert!(
-            matches!(err, JunitError::Xml { position, .. } if position == starts_at),
+            matches!(
+                err,
+                JunitError::Xml { position, .. } | JunitError::UnknownEntity { position, .. }
+                    if position == starts_at
+            ),
             "{bad}: {err:?}"
         );
     }

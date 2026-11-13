@@ -314,3 +314,21 @@ fn a_db_path_that_looks_like_a_sqlite_uri_is_an_ordinary_file() {
         assert_eq!(count(&conn, "runs"), 1, "{name}");
     }
 }
+
+#[test]
+fn a_db_that_cannot_be_opened_is_named_as_given() {
+    // SQLite's own error text repeats the path it was handed; only `file:`
+    // names are rewritten, so an ordinary path is not shown as `./...`.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("store")).unwrap();
+    greenshift()
+        .current_dir(dir.path())
+        .args(["ingest", "--db", "store"])
+        .arg(fixture("nextest.xml"))
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("history store store:")
+                .and(predicate::str::contains("./store").not()),
+        );
+}

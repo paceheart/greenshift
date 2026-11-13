@@ -172,10 +172,11 @@ impl Store {
         // The bundled SQLite is built with SQLITE_USE_URI, so a name starting
         // with `file:` is parsed as a URI whatever the open flags say, and
         // `file::memory:` or `?mode=memory` would silently open an in-memory
-        // database. Anchoring a relative path at `./` makes SQLite read it as
-        // the plain file name it is.
+        // database. Anchoring such a path at `./` makes SQLite read it as the
+        // plain file name it is. Other paths are passed as given, so SQLite's
+        // own error text names the path the user typed.
         let anchored;
-        let sqlite_path = if path.is_relative() {
+        let sqlite_path = if path.as_os_str().as_encoded_bytes().starts_with(b"file:") {
             anchored = Path::new(".").join(path);
             &anchored
         } else {
@@ -187,10 +188,7 @@ impl Store {
 
     /// A migrated store that lives only in memory.
     pub fn open_in_memory() -> Result<Store, StoreError> {
-        let conn = Connection::open_in_memory().map_err(|source| StoreError::Sqlite {
-            path: ":memory:".into(),
-            source,
-        })?;
+        let conn = Connection::open_in_memory().map_err(sqlite_err(":memory:"))?;
         Store::init(conn, ":memory:".into())
     }
 
