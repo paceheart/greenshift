@@ -194,10 +194,18 @@ fn missing_file_fails_and_names_it() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("history.sqlite");
     let missing = dir.path().join("nope.xml");
-    ingest(&db, &[missing], &[])
+    let out = ingest(&db, std::slice::from_ref(&missing), &[])
         .failure()
-        .code(1)
-        .stderr(predicate::str::contains("nope.xml"));
+        .code(1);
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).into_owned();
+    // One line: the file, what failed, and the OS cause, each said once.
+    assert_eq!(
+        stderr,
+        format!(
+            "greenshift: error: {}: could not read file: No such file or directory (os error 2)\n",
+            missing.display()
+        )
+    );
     assert!(!db.exists());
 }
 

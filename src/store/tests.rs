@@ -284,7 +284,9 @@ fn a_failed_insert_writes_nothing() {
         tc("s", "poison", Outcome::Passed, None),
     ];
     let err = store.record_run(&RUN, &cases).unwrap_err();
-    assert!(err.to_string().contains("poisoned"), "{err}");
+    let cause = std::error::Error::source(&err).expect("sqlite error is the source");
+    assert!(cause.to_string().contains("poisoned"), "{cause}");
+    assert!(!err.to_string().contains("poisoned"), "{err}");
     assert_eq!(count(&store, "runs"), 0);
     assert_eq!(count(&store, "tests"), 0);
     assert_eq!(count(&store, "results"), 0);

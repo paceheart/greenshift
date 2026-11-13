@@ -62,13 +62,13 @@ pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 /// Why the store could not be opened or written.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    #[error("could not create {path}: {source}")]
+    #[error("could not create {path}")]
     CreateDir {
         path: String,
         #[source]
         source: std::io::Error,
     },
-    #[error("history store {path}: {source}")]
+    #[error("history store {path}")]
     Sqlite {
         path: String,
         #[source]

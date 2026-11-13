@@ -71,7 +71,8 @@ pub struct Report {
 /// Why a document could not be read as JUnit XML.
 #[derive(Debug, thiserror::Error)]
 pub enum JunitError {
-    #[error("could not read {path}: {source}")]
+    /// `path` is not in the message: callers say which file they were reading.
+    #[error("could not read file")]
     Io {
         path: String,
         #[source]
@@ -79,12 +80,10 @@ pub enum JunitError {
     },
     #[error("not valid UTF-8")]
     NotUtf8,
-    #[error("malformed XML at byte {position}: {source}")]
-    Xml {
-        position: u64,
-        #[source]
-        source: quick_xml::Error,
-    },
+    // quick-xml's own errors repeat their cause in both Display and
+    // source(), so keep the text rather than chaining it.
+    #[error("malformed XML at byte {position}: {message}")]
+    Xml { position: u64, message: String },
     #[error("not JUnit XML: root element is <{0}>, expected <testsuites> or <testsuite>")]
     WrongRoot(String),
     #[error("not JUnit XML: no root element")]
@@ -157,9 +156,9 @@ impl CaseBuilder {
 /// Failure and error text is not kept: only which elements are present.
 pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
     let mut reader = Reader::from_str(xml);
-    let xml_err = |reader: &Reader<&[u8]>, source| JunitError::Xml {
+    let xml_err = |reader: &Reader<&[u8]>, source: quick_xml::Error| JunitError::Xml {
         position: reader.error_position(),
-        source,
+        message: source.to_string(),
     };
 
     let mut report = Report::default();

@@ -358,12 +358,26 @@ fn not_utf8_file_is_an_error() {
 }
 
 #[test]
-fn missing_file_is_an_io_error_naming_the_path() {
+fn missing_file_is_an_io_error_carrying_the_path() {
     let err = parse_file(Path::new("/nonexistent/greenshift/junit.xml")).unwrap_err();
-    assert!(matches!(err, JunitError::Io { .. }), "{err:?}");
-    assert!(err
-        .to_string()
-        .contains("/nonexistent/greenshift/junit.xml"));
+    assert!(
+        matches!(err, JunitError::Io { ref path, .. } if path == "/nonexistent/greenshift/junit.xml"),
+        "{err:?}"
+    );
+    let cause = std::error::Error::source(&err).expect("io error is the source");
+    assert!(cause.to_string().contains("No such file"), "{cause}");
+}
+
+#[test]
+fn xml_error_message_does_not_repeat_itself() {
+    let err = parse_str(MALFORMED).unwrap_err();
+    let text = err.to_string();
+    assert_eq!(
+        text.matches("but `</testsuite>` was found").count(),
+        1,
+        "{text}"
+    );
+    assert!(std::error::Error::source(&err).is_none());
 }
 
 #[test]
