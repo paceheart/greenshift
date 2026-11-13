@@ -37,9 +37,10 @@ greenshift ingest target/nextest/default/junit.xml \
 - Outcomes are `passed`, `failed`, `error` and `skipped`; durations are
   stored in whole milliseconds. Failure text and test output are not stored.
 - greenshift exits 1 and writes nothing if any file is unreadable or not
-  UTF-8, is XML that quick-xml rejects, has a root other than `<testsuites>`
-  or `<testsuite>`, has content outside the root element, or has a
-  `<testcase>` without a name or with a `time` that is not seconds. Inside a
+  UTF-8, is XML that quick-xml rejects, has no root element or ends before
+  it is closed, has a root other than `<testsuites>` or `<testsuite>`, has
+  content outside the root element, or has a `<testcase>` without a name or
+  with a `time` that is not seconds. Inside a
   `<testcase>`, only which `<failure>`, `<error>` and `<skipped>` children it
   has is read; anything else there, nested testcases included, is ignored.
 - An entity or character reference that cannot be resolved, in element text

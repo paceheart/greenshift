@@ -417,6 +417,46 @@ fn unknown_entity_is_an_error() {
 }
 
 #[test]
+fn entity_declared_in_a_dtd_is_unknown() {
+    let err = parse_str(
+        r#"<!DOCTYPE testsuite [ <!ENTITY cog "sprocket"> ]><testsuite name="s"><testcase name="t"><failure>&cog;</failure></testcase></testsuite>"#,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, JunitError::UnknownEntity { ref name, .. } if name == "cog"),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn unresolvable_character_reference_is_an_error() {
+    // In element text the position is the reference; in an attribute it is
+    // the element. The message after the offset is quick-xml's.
+    for (xml, position) in [
+        (
+            r#"<testsuite name="s"><testcase name="t"><failure>&#0;</failure></testcase></testsuite>"#,
+            48,
+        ),
+        (
+            r#"<testsuite name="s"><testcase name="t&#xD800;"/></testsuite>"#,
+            20,
+        ),
+    ] {
+        let err = parse_str(xml).unwrap_err();
+        assert!(
+            matches!(err, JunitError::Xml { position: p, .. } if p == position),
+            "{xml}: {err:?}"
+        );
+        assert!(
+            err.to_string().starts_with(&format!(
+                "malformed XML at byte {position}: invalid character reference"
+            )),
+            "{xml}: {err}"
+        );
+    }
+}
+
+#[test]
 fn entity_errors_in_attributes_carry_no_attribute_relative_range() {
     // quick-xml reports these with a range inside the attribute value, which
     // would read as a second, wrong file offset after "at byte N".
