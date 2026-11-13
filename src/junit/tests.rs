@@ -601,6 +601,7 @@ fn attribute_and_reference_errors_report_where_they_are() {
     for (bad, starts_at) in [
         (r#"<testcase name="t" name="u"/>"#, at),
         (r#"<testcase name="t" foo/>"#, at),
+        (r#"<testcase name=t/>"#, at),
         (r#"<testcase name="t&bogus;"/>"#, at),
         // The reference itself starts after `<testcase name="t"><failure>`.
         (
@@ -618,5 +619,8 @@ fn attribute_and_reference_errors_report_where_they_are() {
             ),
             "{bad}: {err:?}"
         );
+        // quick-xml counts attribute error positions from the tag, which
+        // would read as a second, wrong file offset.
+        assert!(!err.to_string().contains("position"), "{bad}: {err}");
     }
 }

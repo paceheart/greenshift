@@ -338,13 +338,32 @@ fn seconds_to_ms(text: &str) -> Option<i64> {
 }
 
 /// An attribute's unescaped value, if present. `position` is the start of
-/// the element: quick-xml's escape errors carry a range relative to the
-/// attribute value, which would read as a file offset, so they are reported
-/// without it.
+/// the element: quick-xml's attribute and escape errors carry positions
+/// relative to the tag or the attribute value, which would read as file
+/// offsets, so they are reported without them.
 fn attr(e: &BytesStart<'_>, key: &[u8], position: u64) -> Result<Option<String>, JunitError> {
     use quick_xml::escape::EscapeError;
+    use quick_xml::events::attributes::AttrError;
     for a in e.attributes() {
-        let a = a.map_err(|s| xml_err(position, quick_xml::Error::InvalidAttr(s)))?;
+        let a = a.map_err(|s| {
+            let message = match s {
+                AttrError::ExpectedEq(_) => {
+                    "attribute key must be directly followed by `=` or space".into()
+                }
+                AttrError::ExpectedValue(_) => "`=` must be followed by an attribute value".into(),
+                AttrError::UnquotedValue(_) => {
+                    "attribute value must be enclosed in `\"` or `'`".into()
+                }
+                AttrError::ExpectedQuote(_, quote) => {
+                    format!(
+                        "missing closing quote `{}` in attribute value",
+                        quote as char
+                    )
+                }
+                AttrError::Duplicated(..) => "duplicated attribute".into(),
+            };
+            JunitError::Xml { position, message }
+        })?;
         if a.key.local_name().as_ref() == key {
             return match a.unescape_value() {
                 Ok(v) => Ok(Some(v.into_owned())),
