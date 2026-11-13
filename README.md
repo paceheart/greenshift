@@ -33,8 +33,12 @@ greenshift ingest target/nextest/default/junit.xml \
   `classname`, or the enclosing `<testsuite>` name when there is none.
 - Outcomes are `passed`, `failed`, `error` and `skipped`; durations are
   stored in whole milliseconds. Failure text and test output are not stored.
-- If any file is unreadable or malformed, greenshift exits 1 and writes
-  nothing.
+- greenshift exits 1 and writes nothing if any file is unreadable or not
+  UTF-8, is XML that quick-xml rejects, has a root other than `<testsuites>`
+  or `<testsuite>`, has content outside the root element, or has a
+  `<testcase>` without a name or with a `time` that is not seconds. It does
+  not otherwise validate XML well-formedness: the input is expected to come
+  from a known producer.
 
 Known producers: cargo-nextest and vaelii's test runner. Anything that writes
 the common `<testsuites>/<testsuite>/<testcase>` shape should work.
