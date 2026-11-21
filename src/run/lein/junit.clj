@@ -30,8 +30,9 @@
 ;; - The file is written when run-tests returns, before lein's System/exit,
 ;;   with a shutdown hook as a backstop for a JVM that exits inside the
 ;;   run. If run-tests never started (a namespace failed to load), no file
-;;   is written, so greenshift records the run as partial rather than as
-;;   tests that were skipped.
+;;   is written, so greenshift records the run as partial (or, when no
+;;   group wrote a file, not at all) rather than as tests that were
+;;   skipped.
 ;;
 ;; Every hook chains to what was there before (get-method, alter-var-root),
 ;; so a project's own clojure.test hooks keep working. A report method that
