@@ -214,6 +214,21 @@ fn with_no_map_one_is_added_after_the_last_option() {
 }
 
 #[test]
+fn with_no_map_the_new_one_lines_up_with_the_last_key_not_one_on_the_first_line() {
+    let text = "(defproject a \"1\" :description \"x\"\n  :main foo)\n";
+    let merged = changed(merge(text, false).unwrap());
+    assert!(
+        merged.starts_with("(defproject a \"1\" :description \"x\"\n  :main foo\n  ;; Added by"),
+        "{merged}"
+    );
+    assert!(
+        merged.contains("\n  :test-selectors {:greenshift "),
+        "{merged}"
+    );
+    assert_eq!(merge(&merged, false).unwrap(), Merge::Unchanged);
+}
+
+#[test]
 fn a_trailing_comment_stays_with_the_entry_before_it() {
     let text =
         "(defproject a \"1\"\n  :test-selectors {:fast :fast ; quick ones\n                   })";

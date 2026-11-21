@@ -376,7 +376,7 @@ impl Reader<'_> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selectors {
     /// No `:test-selectors` key. `after` is the end of the last form of
-    /// the `defproject`, and `indent` the column of its first key.
+    /// the `defproject`, and `indent` the column of its last key.
     Absent { after: usize, indent: usize },
     /// A literal map: the map form.
     Literal(Form),
@@ -452,9 +452,12 @@ pub fn selectors(text: &str) -> Result<Selectors, ProjectError> {
     Ok(match found {
         None => {
             let last = project.children().last().expect("defproject is its head");
+            // The last key's column: the first key may share the
+            // defproject's own line, at a column no other key has.
             let indent = options
-                .first()
-                .map_or(2, |first| column(text, first.span.start));
+                .chunks(2)
+                .last()
+                .map_or(2, |pair| column(text, pair[0].span.start));
             Selectors::Absent {
                 after: last.span.end,
                 indent,
