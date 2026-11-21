@@ -11,7 +11,7 @@
 //! per textual commit namespace.
 //! The exit status is that of the first invocation that failed, or 0.
 //!
-//! Each backend lives in a module of its own beside [`nextest`]; this
+//! Each backend lives in a module of its own, [`nextest`] and [`lein`]; this
 //! module knows nothing of any one runner.
 
 use std::ffi::OsString;
@@ -25,6 +25,7 @@ use crate::plan::{Inventory, InventoryTest};
 use crate::select::Class;
 use crate::tainted::Tainted;
 
+pub mod lein;
 pub mod nextest;
 
 /// One run of a test runner's program.

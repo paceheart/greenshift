@@ -255,6 +255,8 @@ pub struct RunArgs {
 pub enum Backend {
     /// Run the tests with cargo-nextest.
     Nextest(NextestRunArgs),
+    /// Run the tests with Leiningen (`lein test`).
+    Lein(LeinRunArgs),
 }
 
 /// What `run` takes whatever the test runner.
@@ -312,6 +314,30 @@ pub struct NextestRunArgs {
     /// Arguments for `cargo nextest run` and, where it takes them,
     /// `cargo nextest list`.
     #[arg(last = true, value_name = "NEXTEST_ARGS")]
+    pub args: Vec<std::ffi::OsString>,
+}
+
+#[derive(Debug, Args)]
+#[command(mut_arg("source", |source| {
+    source
+        .action(clap::ArgAction::Set)
+        .default_value("lein")
+        .help("Read only runs from this source, and record the run as from it")
+}))]
+pub struct LeinRunArgs {
+    #[command(flatten)]
+    pub options: RunOptions,
+
+    /// The most bytes of test names to give one `lein test :only`, when
+    /// project.clj has no :greenshift selector; more are split over
+    /// several runs.
+    #[arg(long, value_name = "BYTES", default_value_t = run::lein::MAX_ONLY_BYTES,
+          value_parser = clap::value_parser!(usize))]
+    pub max_only_bytes: usize,
+
+    /// Arguments for the listing's `lein test`: selectors and namespaces,
+    /// as `lein test` takes them. The runs get only greenshift's own.
+    #[arg(last = true, value_name = "LEIN_TEST_ARGS")]
     pub args: Vec<std::ffi::OsString>,
 }
 
@@ -553,6 +579,7 @@ pub fn run_with_control(control: &TransportControl) -> anyhow::Result<ExitCode> 
         Command::Plan(args) => plan(&args),
         Command::Run(args) => match args.backend {
             Backend::Nextest(args) => run_nextest_with_control(&args, control),
+            Backend::Lein(args) => run_lein_with_control(&args, control),
         },
         Command::History(args) => history(&args, control),
         Command::Init(args) => match args.backend {
@@ -1053,6 +1080,23 @@ fn run_nextest_with_control(
         std::env::var_os("NEXTEST_PROFILE").as_deref(),
         args.max_filterset_bytes,
     )?;
+    run::run_with_control(&backend, &args.options, control)
+}
+
+/// Run the whole cycle with Leiningen; see [`run`] and [`run::lein`].
+pub fn run_lein(args: &LeinRunArgs) -> anyhow::Result<ExitCode> {
+    run_lein_with_control(args, &TransportControl::default())
+}
+
+fn run_lein_with_control(
+    args: &LeinRunArgs,
+    control: &TransportControl,
+) -> anyhow::Result<ExitCode> {
+    let (selector, note) = run::lein::Selector::for_project(std::path::Path::new("project.clj"));
+    if let Some(note) = note {
+        eprintln!("greenshift: {note}");
+    }
+    let backend = run::lein::Lein::new(args.args.clone(), selector, args.max_only_bytes);
     run::run_with_control(&backend, &args.options, control)
 }
 
