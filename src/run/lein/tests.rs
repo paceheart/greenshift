@@ -225,7 +225,10 @@ fn the_listing_reads_as_an_inventory() {
 fn the_selector_comes_from_project_clj() {
     let dir = tempfile::tempdir().unwrap();
     let clj = dir.path().join("project.clj");
-    assert_eq!(Selector::for_project(&clj).0, Selector::Only);
+    // No project.clj here is noted: lein may find one in a parent.
+    let (selector, note) = Selector::for_project(&clj);
+    assert_eq!(selector, Selector::Only);
+    assert!(note.unwrap().contains("project's root"));
     std::fs::write(&clj, "(defproject a \"1\" :test-selectors {:fast :fast})").unwrap();
     let (selector, note) = Selector::for_project(&clj);
     assert_eq!(selector, Selector::Only);

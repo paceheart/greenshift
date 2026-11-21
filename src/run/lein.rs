@@ -60,12 +60,24 @@ pub enum Selector {
 impl Selector {
     /// The selector a project can run with: [`Selector::Names`] when
     /// `project_clj`'s literal `:test-selectors` has the `:greenshift`
-    /// entry, else [`Selector::Only`], with a note to show when that is
-    /// because the entry is missing or the map computed (rather than the
-    /// file missing, which lein itself will name).
+    /// entry, else [`Selector::Only`], with a note saying why: the entry
+    /// is missing, the map computed, or the file unreadable. A missing
+    /// file is noted too: lein, run in a subdirectory, finds the project
+    /// in a parent and runs, so without a note the fallback would pass
+    /// unseen.
     pub fn for_project(project_clj: &Path) -> (Selector, Option<String>) {
-        let Ok(text) = std::fs::read_to_string(project_clj) else {
-            return (Selector::Only, None);
+        let text = match std::fs::read_to_string(project_clj) {
+            Ok(text) => text,
+            Err(err) => {
+                return (
+                    Selector::Only,
+                    Some(format!(
+                        "could not read {} ({err}), so each group runs as \
+                         `lein test :only ns/var ...`; run greenshift in the project's root",
+                        Tainted::from(project_clj)
+                    )),
+                );
+            }
         };
         match crate::lein::has_selector(&text) {
             Ok(true) => (Selector::Names, None),
