@@ -736,3 +736,33 @@ fn each_report_is_recorded_once_however_a_chained_method_passes_it_on() {
     assert_eq!(xml.matches("<error ").count(), 2, "{xml}");
     assert_eq!(xml.matches("assertions=\"2\"").count(), 2, "{xml}");
 }
+
+#[test]
+fn a_report_var_a_project_injection_made_a_function_still_has_every_result_recorded() {
+    let _turn = turn();
+    if !lein_ready() {
+        return;
+    }
+    let project = Project::new();
+    project.init();
+    // Some tools make clojure.test/report a function of their own from an
+    // injection, before greenshift's, hiding the multimethod (test.check
+    // allows for them, TCHECK-125).
+    let clj = project.root().join("project.clj");
+    let text_now = std::fs::read_to_string(&clj).unwrap();
+    std::fs::write(
+        &clj,
+        text_now.replace(
+            "  :preserve-eval-meta true\n",
+            "  :preserve-eval-meta true\n  \
+             :injections [(alter-var-root #'clojure.test/report (fn [r] (fn [m] (r m))))]\n",
+        ),
+    )
+    .unwrap();
+    let out = project.run(&[], &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let runs = project.runs();
+    assert_eq!(runs.len(), 1, "{}", text(&out.stderr));
+    assert!(!runs[0].partial);
+    assert_eq!(runs[0].results, expected_results(&[]));
+}

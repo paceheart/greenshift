@@ -35,7 +35,9 @@
 ;; so a project's own clojure.test hooks keep working. A report method that
 ;; a test namespace defines when it loads, after this file, replaces
 ;; greenshift's; run-tests, called once every namespace has loaded, hooks
-;; such a method again, chaining to it.
+;; such a method again, chaining to it. When a project's own injection has
+;; made clojure.test/report a plain function, hiding the multimethod, the
+;; reporter wraps that function instead.
 (ns greenshift.lein.junit
   (:require [clojure.string :as str]
             [clojure.test :as t]))
@@ -240,33 +242,47 @@
         ;; The multimethod itself: lein later hooks the var, so run-tests
         ;; finds the methods through this, not through #'t/report.
         mf t/report
-        ours (atom {})]
-    (hook! mf ours :begin-test-var
-           (fn [begin]
-             (fn [m]
-               (reset! started (System/nanoTime))
-               (swap! cases conj (case-of (:var m)))
-               (reset! current (dec (count @cases)))
-               (begin m))))
-    (hook! mf ours :end-test-var
-           (fn [end]
-             (fn [m]
-               (when-let [i @current]
-                 (swap! cases assoc-in [i :nanos] (- (System/nanoTime) (or @started (System/nanoTime))))
-                 (reset! current nil))
-               (end m))))
-    (hook! mf ours :end-test-ns
-           (fn [end-ns]
-             (fn [m]
-               (reset! current-ns nil)
-               (end-ns m))))
-    ;; Record each assertion as well as counting it, keeping clojure.test's own report.
-    (doseq [[k kind] [[:pass nil] [:fail :failure] [:error :error]]]
-      (hook! mf ours k
-             (fn [o]
-               (fn [m]
-                 (note! k (when kind (problem m k kind)))
-                 (o m)))))
+        ours (atom {})
+        hooks [[:begin-test-var
+                (fn [begin]
+                  (fn [m]
+                    (reset! started (System/nanoTime))
+                    (swap! cases conj (case-of (:var m)))
+                    (reset! current (dec (count @cases)))
+                    (begin m)))]
+               [:end-test-var
+                (fn [end]
+                  (fn [m]
+                    (when-let [i @current]
+                      (swap! cases assoc-in [i :nanos] (- (System/nanoTime) (or @started (System/nanoTime))))
+                      (reset! current nil))
+                    (end m)))]
+               [:end-test-ns
+                (fn [end-ns]
+                  (fn [m]
+                    (reset! current-ns nil)
+                    (end-ns m)))]]
+        ;; Record each assertion as well as counting it, keeping clojure.test's own report.
+        hooks (into hooks
+                    (for [[k kind] [[:pass nil] [:fail :failure] [:error :error]]]
+                      [k (fn [o]
+                           (fn [m]
+                             (note! k (when kind (problem m k kind)))
+                             (o m)))]))]
+    (if (instance? clojure.lang.MultiFn mf)
+      (doseq [[k wrap] hooks]
+        (hook! mf ours k wrap))
+      ;; A project's own injection made the report var a function of its
+      ;; own, hiding the multimethod (test.check allows for such tools,
+      ;; TCHECK-125): record around that function instead.
+      (alter-var-root
+       #'t/report
+       (fn [report]
+         (let [records (into {} (for [[k wrap] hooks] [k (wrap report)]))]
+           (fn [m & more]
+             (if-let [record (records (:type m))]
+               (record m)
+               (apply report m more)))))))
     (alter-var-root #'t/test-ns
                     (fn [test-ns]
                       (fn [ns]
