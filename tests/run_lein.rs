@@ -613,3 +613,48 @@ fn a_jvm_that_exits_inside_a_test_still_writes_every_tests_result() {
         .count();
     assert_eq!(tests, DEFAULT.len() + 1, "{results:?}");
 }
+
+#[test]
+fn a_report_method_a_test_namespace_defines_still_has_its_failures_recorded() {
+    let _turn = turn();
+    if !lein_ready() {
+        return;
+    }
+    let project = Project::new();
+    project.init();
+    // Loaded after greenshift's reporter, this namespace's own :fail
+    // method replaces greenshift's, chaining to nothing.
+    std::fs::write(
+        project.root().join("test/scratch/own_report_test.clj"),
+        "(ns scratch.own-report-test (:require [clojure.test :as t :refer :all]))\n\
+         (defmethod t/report :fail [m]\n  \
+           (t/with-test-out (println \"own :fail\" (:message m)))\n  \
+           (t/inc-report-counter :fail))\n\
+         (deftest fails-its-own-way (is (= 1 2) \"mine\"))\n",
+    )
+    .unwrap();
+    let out = project.run(&[], &[]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(stdout.contains("own :fail mine"), "{stdout}");
+    let runs = project.runs();
+    assert_eq!(runs.len(), 1);
+    let results = &runs[0].results;
+    let outcome = |suite: &str, name: &str| {
+        results
+            .iter()
+            .find(|(s, n, _)| s == suite && n == name)
+            .map(|(_, _, outcome)| outcome.clone())
+    };
+    assert_eq!(
+        outcome("scratch.own-report-test", "fails-its-own-way").as_deref(),
+        Some("failed"),
+        "{results:?}"
+    );
+    // The other namespaces' failures go through that method too.
+    assert_eq!(
+        outcome("scratch.errors-test", "fails").as_deref(),
+        Some("failed"),
+        "{results:?}"
+    );
+}

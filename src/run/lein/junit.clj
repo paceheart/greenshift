@@ -29,7 +29,10 @@
 ;;   tests that were skipped.
 ;;
 ;; Every hook chains to what was there before (get-method, alter-var-root),
-;; so a project's own clojure.test hooks keep working.
+;; so a project's own clojure.test hooks keep working. A report method that
+;; a test namespace defines when it loads, after this file, replaces
+;; greenshift's; run-tests, called once every namespace has loaded, hooks
+;; such a method again, chaining to it.
 (ns greenshift.lein.junit
   (:require [clojure.string :as str]
             [clojure.test :as t]))
@@ -190,6 +193,32 @@
   [^String path]
   (into [] (comp (remove str/blank?) (distinct)) (str/split-lines (slurp path))))
 
+(def ^:private last-event (atom nil)) ; the report map greenshift last recorded
+
+(defn- hook!
+  "Make report method k of the multimethod mf (wrap previous), previous
+  being the method k has now, and note it in ours as k's. A report map
+  that reaches greenshift's method again, through a method that chains
+  to the one it replaced, is passed on without being recorded twice."
+  [^clojure.lang.MultiFn mf ours k wrap]
+  (let [previous (.getMethod mf k)
+        record (wrap previous)
+        f (fn [m]
+            (if (identical? m @last-event)
+              (previous m)
+              (do (reset! last-event m)
+                  (record m))))]
+    (.addMethod mf k f)
+    (swap! ours assoc k [wrap f])))
+
+(defn- rehook!
+  "Hook again every method in ours that a later defmethod replaced (a
+  test namespace's own, say, loaded after this file), chaining to it."
+  [mf ours]
+  (doseq [[k [wrap f]] @ours]
+    (when-not (identical? f (.getMethod ^clojure.lang.MultiFn mf k))
+      (hook! mf ours k wrap))))
+
 (defn install!
   "Record every test var's result and write them as JUnit to junit when
   the run ends; run the namespaces in the order the names file first
@@ -201,30 +230,36 @@
                               k (if (pos? i) (subs n 0 i) n)]
                           (if (contains? m k) m (assoc m k (count m)))))
                       {} names)
-        default (get-method t/report :default)
-        orig (fn [k] (or (get-method t/report k) default))
-        begin (orig :begin-test-var)
-        end (orig :end-test-var)
-        end-ns (orig :end-test-ns)]
-    (defmethod t/report :begin-test-var [m]
-      (reset! started (System/nanoTime))
-      (swap! cases conj (case-of (:var m)))
-      (reset! current (dec (count @cases)))
-      (begin m))
-    (defmethod t/report :end-test-var [m]
-      (when-let [i @current]
-        (swap! cases assoc-in [i :nanos] (- (System/nanoTime) (or @started (System/nanoTime))))
-        (reset! current nil))
-      (end m))
-    (defmethod t/report :end-test-ns [m]
-      (reset! current-ns nil)
-      (end-ns m))
+        ;; The multimethod itself: lein later hooks the var, so run-tests
+        ;; finds the methods through this, not through #'t/report.
+        mf t/report
+        ours (atom {})]
+    (hook! mf ours :begin-test-var
+           (fn [begin]
+             (fn [m]
+               (reset! started (System/nanoTime))
+               (swap! cases conj (case-of (:var m)))
+               (reset! current (dec (count @cases)))
+               (begin m))))
+    (hook! mf ours :end-test-var
+           (fn [end]
+             (fn [m]
+               (when-let [i @current]
+                 (swap! cases assoc-in [i :nanos] (- (System/nanoTime) (or @started (System/nanoTime))))
+                 (reset! current nil))
+               (end m))))
+    (hook! mf ours :end-test-ns
+           (fn [end-ns]
+             (fn [m]
+               (reset! current-ns nil)
+               (end-ns m))))
     ;; Record each assertion as well as counting it, keeping clojure.test's own report.
     (doseq [[k kind] [[:pass nil] [:fail :failure] [:error :error]]]
-      (let [o (orig k)]
-        (defmethod t/report k [m]
-          (note! k (when kind (problem m k kind)))
-          (o m))))
+      (hook! mf ours k
+             (fn [o]
+               (fn [m]
+                 (note! k (when kind (problem m k kind)))
+                 (o m)))))
     (alter-var-root #'t/test-ns
                     (fn [test-ns]
                       (fn [ns]
@@ -234,6 +269,7 @@
      #'t/run-tests
      (fn [run-tests]
        (fn [& namespaces]
+         (rehook! mf ours)
          (let [nss (sort-by #(get order (ns-str %) Long/MAX_VALUE)
                             (or (seq namespaces) [*ns*]))]
            (reset! run-started (System/nanoTime))

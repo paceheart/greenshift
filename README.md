@@ -494,7 +494,9 @@ greenshift run lein --commit "$(git rev-parse HEAD)"
   JVM; a JVM that fails before any test runs (a namespace that does not
   compile) writes none, and the run is recorded as partial. Every hook
   chains to what was there, so a project's own `clojure.test` hooks and
-  lein's output stay as they are.
+  lein's output stay as they are; a `report` method that a test
+  namespace defines as it loads is chained to as well, when the run
+  starts.
 - **Record.** As `run nextest` records.
 - **LEIN_TEST_ARGS**, after `--`, go to the listing's `lein test` only:
   selectors such as `:slow` and namespaces. The runs get only
