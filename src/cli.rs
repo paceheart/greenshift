@@ -12,8 +12,9 @@ use clap::builder::{NonEmptyStringValueParser, StyledStr};
 use clap::error::{ContextKind, ContextValue};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use crate::report_key::{ReportKey, ReportKeySet};
 use crate::select::{self, Class, Empirical, Estimator, Line, Smoothed, Thresholds, Wilson};
-use crate::store::{self, CommitId, NewRun, Store};
+use crate::store::{self, CommitId, ImportAcknowledgement, NewRun, ReplayGrouping, Store};
 use crate::tainted::Tainted;
 use crate::{junit, nextest, plan, run};
 
@@ -99,7 +100,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Record JUnit XML results in the history store, all as one run.
+    /// Import all-new JUnit reports as one aggregate run; all-seen replays
+    /// no-op, and mixing seen/unseen reports fails without recording.
     Ingest(IngestArgs),
     /// Print which tests to run first (rich) and after (poor), from history.
     Select(SelectArgs),
@@ -141,6 +143,8 @@ pub struct InitNextestArgs {
 
     /// The greenshift release the workflow installs, such as v0.2.0. It
     /// needs `run nextest` and durable history, so it is newer than v0.1.0.
+    /// All writers and trusted publishers sharing history must support its
+    /// schema. Tag validation alone does not establish schema compatibility.
     #[arg(long, value_name = "TAG", required = true)]
     pub release: crate::init::Release,
 
@@ -277,7 +281,11 @@ pub struct NextestRunArgs {
 
 #[derive(Debug, Args)]
 pub struct IngestArgs {
-    /// JUnit XML files to record. All of them make up one run.
+    /// JUnit XML files to import as one run. Exact report bytes at the same
+    /// commit are recorded once, regardless of path/order. Replays retain the
+    /// first grouping and metadata; partial overlap with unseen reports fails.
+    /// Without --commit, imports share one unknown-commit namespace. Use
+    /// `run nextest` to record distinct executions, including identical reports.
     #[arg(required = true, value_name = "JUNIT_XML")]
     pub files: Vec<PathBuf>,
 
@@ -620,15 +628,20 @@ fn history(args: &HistoryArgs, control: &TransportControl) -> anyhow::Result<Exi
     let result = (|| -> anyhow::Result<()> {
         match &args.operation {
             HistoryCommand::Restore(options) => {
-                if !remote.restore(&options.db, options.cache_dir.as_deref())? {
-                    eprintln!("greenshift: ⚠ no durable history; running without it");
+                match remote.restore(&options.db, options.cache_dir.as_deref())? {
+                    crate::history::RestoreOutcome::Missing => {
+                        eprintln!("greenshift: ⚠ no durable history; running without it");
+                    }
+                    crate::history::RestoreOutcome::Restored(report) => {
+                        show_restore_report(&report);
+                    }
                 }
             }
             HistoryCommand::Publish(options) => {
-                println!(
-                    "{}",
-                    remote.publish(&options.data.db, options.data.cache_dir.as_deref())?
-                );
+                let published =
+                    remote.publish(&options.data.db, options.data.cache_dir.as_deref())?;
+                println!("{}", published.oid());
+                show_publish_report(published.report());
             }
             HistoryCommand::CacheKey(_) => {
                 println!(
@@ -655,6 +668,41 @@ fn history(args: &HistoryArgs, control: &TransportControl) -> anyhow::Result<Exi
     Ok(ExitCode::SUCCESS)
 }
 
+fn show_publish_report(report: &crate::history::MergeReport) {
+    show_merge_replays(report);
+    for group in report.excluded_groups() {
+        eprintln!(
+            "greenshift: ⚠ history group {} was not published: partial report overlap; {} unseen report memberships remain only in the source artifact, with no automatic recovery. Nonconflicting history was published",
+            group.history_id(), group.unseen_memberships(),
+        );
+    }
+}
+
+pub(crate) fn show_restore_report(report: &crate::history::MergeReport) {
+    show_merge_replays(report);
+    for group in report.excluded_groups() {
+        eprintln!(
+            "greenshift: ⚠ history group {} was not restored locally: partial report overlap; {} unseen report memberships remain in the incoming source, not the local destination",
+            group.history_id(), group.unseen_memberships(),
+        );
+    }
+    for group in report.retained_groups() {
+        eprintln!(
+            "greenshift: ⚠ local history group {} retains {} report memberships absent from the source; publishing back may exclude this group. Restore did not reconcile the grouping conflict; no automatic recovery",
+            group.history_id(), group.unseen_memberships(),
+        );
+    }
+}
+
+fn show_merge_replays(report: &crate::history::MergeReport) {
+    if report.metadata_replays() != 0 {
+        eprintln!("greenshift: ⚠ report replay retains destination metadata, including source, partial coverage and branch/tag ({} replay groups)", report.metadata_replays());
+    }
+    if report.nonexact_replays() != 0 {
+        eprintln!("greenshift: ⚠ existing report grouping retained; subset/spanning aggregate equivalence is not independently verified ({} replay groups)", report.nonexact_replays());
+    }
+}
+
 /// Name `err` on stderr as greenshift names every error, whether it ends
 /// the run (from `main`) or is planned past (by [`plan()`]).
 pub fn show_error(err: &anyhow::Error) {
@@ -664,26 +712,80 @@ pub fn show_error(err: &anyhow::Error) {
 /// Parse every file first, so a bad file leaves the store untouched, then
 /// record them all in one transaction.
 pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
+    record_reports(args, true)
+}
+
+/// A real execution is a new observation even when its reports are identical.
+pub(crate) fn record_execution(args: &IngestArgs) -> anyhow::Result<()> {
+    record_reports(args, false)
+}
+
+fn record_reports(args: &IngestArgs, keyed: bool) -> anyhow::Result<()> {
     let mut cases = Vec::new();
+    let mut files = Vec::new();
+    let mut keys = HashSet::new();
     for file in &args.files {
-        let report = junit::parse_file(file).with_context(|| Tainted::from(file.as_path()))?;
+        let report = if keyed {
+            let bytes = std::fs::read(file)
+                .map_err(|source| junit::JunitError::Io {
+                    path: file.clone(),
+                    source,
+                })
+                .with_context(|| Tainted::from(file.as_path()))?;
+            let key = ReportKey::from_bytes(args.commit.as_ref(), &bytes);
+            if !keys.insert(key) {
+                continue;
+            }
+            let text = std::str::from_utf8(&bytes)
+                .map_err(|_| junit::JunitError::NotUtf8)
+                .with_context(|| Tainted::from(file.as_path()))?;
+            junit::parse_str(text).with_context(|| Tainted::from(file.as_path()))?
+        } else {
+            junit::parse_file(file).with_context(|| Tainted::from(file.as_path()))?
+        };
+        files.push(file.clone());
         cases.extend(report.into_cases());
     }
     let git_ref = resolve_git_ref(args.branch.as_deref(), args.tag.as_deref(), |var| {
         std::env::var_os(var)
     });
+    let keys = if keyed {
+        Some(ReportKeySet::new(keys)?)
+    } else {
+        None
+    };
     let mut store = Store::open(&args.db)?;
-    let recorded = store.record_run(
-        &NewRun {
-            commit: args.commit.as_ref(),
-            source: &args.source,
-            files: &args.files,
-            partial: args.partial,
-            branch: git_ref.as_ref().and_then(GitRef::branch),
-            tag: git_ref.as_ref().and_then(GitRef::tag),
-        },
-        &cases,
-    )?;
+    let run = NewRun {
+        commit: args.commit.as_ref(),
+        source: &args.source,
+        files: &files,
+        partial: args.partial,
+        branch: git_ref.as_ref().and_then(GitRef::branch),
+        tag: git_ref.as_ref().and_then(GitRef::tag),
+    };
+    let recorded = if let Some(keys) = &keys {
+        match store.record_import(&run, keys, &cases)? {
+            ImportAcknowledgement::Recorded(recorded) => recorded,
+            ImportAcknowledgement::AlreadyPresent {
+                grouping,
+                metadata_retained,
+            } => {
+                println!(
+                    "greenshift: reports already recorded in {}; no new observation",
+                    Tainted::from(args.db.as_path())
+                );
+                if metadata_retained {
+                    eprintln!("greenshift: warning: existing metadata retained, including source, partial coverage and branch/tag");
+                }
+                if grouping == ReplayGrouping::MembershipOnly {
+                    eprintln!("greenshift: warning: existing grouping retained; report membership is already present, subset aggregate equivalence is not independently verified");
+                }
+                return Ok(());
+            }
+        }
+    } else {
+        store.record_run(&run, &cases)?
+    };
     let plural = |n: usize| if n == 1 { "" } else { "s" };
     println!(
         "greenshift: recorded {}run {} with {} test{} from {} file{} into {}{}",
@@ -691,8 +793,8 @@ pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
         recorded.run_id,
         recorded.results,
         plural(recorded.results),
-        args.files.len(),
-        plural(args.files.len()),
+        files.len(),
+        plural(files.len()),
         Tainted::from(args.db.as_path()),
         match &git_ref {
             Some(GitRef::Branch(name)) => format!(" on branch {}", Tainted::raw(name.as_str())),
@@ -980,6 +1082,52 @@ fn written(result: std::io::Result<ExitCode>) -> anyhow::Result<ExitCode> {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn test_ingest_programmatic_empty_import_does_not_create_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let args = IngestArgs {
+            files: vec![],
+            db: directory.path().join("history.sqlite"),
+            commit: None,
+            source: "fixture".to_owned(),
+            partial: false,
+            branch: None,
+            tag: None,
+        };
+        assert!(ingest(&args).is_err());
+        assert!(!args.db.exists());
+    }
+
+    #[test]
+    fn test_record_execution_identical_reports_are_distinct_from_import_retries() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("report.xml");
+        std::fs::write(
+            &file,
+            r#"<testsuite name="gears"><testcase name="turns"/></testsuite>"#,
+        )
+        .unwrap();
+        let args = IngestArgs {
+            files: vec![file],
+            db: directory.path().join("history.sqlite"),
+            commit: Some("aaaaaaa".parse().unwrap()),
+            source: "fixture".to_owned(),
+            partial: false,
+            branch: Some("fixture".to_owned()),
+            tag: None,
+        };
+        record_execution(&args).unwrap();
+        record_execution(&args).unwrap();
+        ingest(&args).unwrap();
+        ingest(&args).unwrap();
+        let conn = rusqlite::Connection::open(&args.db).unwrap();
+        let (runs, identities, members): (i64, i64, i64) = conn.query_row(
+            "SELECT count(*),count(DISTINCT history_id),(SELECT count(*) FROM report_memberships) FROM runs", [],
+            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+        ).unwrap();
+        assert_eq!((runs, identities, members), (3, 3, 1));
+    }
 
     #[test]
     fn test_transport_finish_observes_latched_interrupt_and_disarms_phase() {

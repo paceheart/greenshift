@@ -171,7 +171,7 @@ fn default_db_is_created_under_dot_greenshift() {
 }
 
 #[test]
-fn each_invocation_is_a_new_run_sharing_test_identities() {
+fn different_commits_are_new_runs_sharing_test_identities() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("history.sqlite");
     ingest(&db, &[fixture("nextest.xml")], &["--commit", "aaaaaaa"]).success();
@@ -437,7 +437,7 @@ fn partial_flags(conn: &Connection) -> Vec<bool> {
 }
 
 #[test]
-fn partial_marks_the_run_as_partial() {
+fn partial_replay_retains_original_metadata_without_another_run() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("history.sqlite");
     let files = [fixture("nextest.xml")];
@@ -446,9 +446,10 @@ fn partial_marks_the_run_as_partial() {
         .stdout(predicate::str::contains("recorded run 1 with"));
     ingest(&db, &files, &["--partial"])
         .success()
-        .stdout(predicate::str::contains("recorded partial run 2 with"));
+        .stdout(predicate::str::contains("already recorded"))
+        .stderr(predicate::str::contains("metadata"));
     let conn = Connection::open(&db).unwrap();
-    assert_eq!(partial_flags(&conn), [false, true]);
+    assert_eq!(partial_flags(&conn), [false]);
 }
 
 /// `ingest` of one fixture with `extra` arguments and, of the branch and tag
@@ -507,10 +508,7 @@ fn an_empty_head_ref_falls_back_to_the_ref_name() {
     let env = [("GITHUB_HEAD_REF", ""), ("GITHUB_REF_NAME", "main")];
     ingest_in_env(&db, &[], &env).success();
     ingest_in_env(&db, &[], &[("GITHUB_REF_NAME", "main")]).success();
-    assert_eq!(
-        branches(&db),
-        [Some("main".to_owned()), Some("main".to_owned())]
-    );
+    assert_eq!(branches(&db), [Some("main".to_owned())]);
 }
 
 #[test]
@@ -527,7 +525,7 @@ fn no_flag_and_no_ci_env_is_no_branch() {
         &[("GITHUB_HEAD_REF", ""), ("GITHUB_REF_NAME", "")],
     )
     .success();
-    assert_eq!(branches(&db), [None, None]);
+    assert_eq!(branches(&db), [None]);
 }
 
 #[test]
@@ -606,15 +604,17 @@ fn either_flag_replaces_the_ci_env() {
     ingest_in_env(&db, &["--branch", "mine"], &tag_push)
         .success()
         .stdout(predicate::str::contains(" on branch mine\n"));
+    assert_eq!(refs(&db), [branch("mine")]);
+    let tag_db = dir.path().join("tag.sqlite");
     let pull_request = [
         ("GITHUB_HEAD_REF", "feature"),
         ("GITHUB_REF_NAME", "7/merge"),
         ("GITHUB_REF_TYPE", "branch"),
     ];
-    ingest_in_env(&db, &["--tag", "v9"], &pull_request)
+    ingest_in_env(&tag_db, &["--tag", "v9"], &pull_request)
         .success()
         .stdout(predicate::str::contains(" on tag v9\n"));
-    assert_eq!(refs(&db), [branch("mine"), tag("v9")]);
+    assert_eq!(refs(&tag_db), [tag("v9")]);
 }
 
 #[test]

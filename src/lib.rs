@@ -15,6 +15,7 @@ pub mod init;
 pub mod junit;
 pub mod nextest;
 pub mod plan;
+pub mod report_key;
 pub mod run;
 pub mod select;
 pub mod store;

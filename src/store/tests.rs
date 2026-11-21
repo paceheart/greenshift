@@ -70,7 +70,7 @@ fn row(suite: &str, name: &str, outcome: &str, ms: Option<i64>) -> Row {
 fn fresh_store_is_at_the_current_schema_version() {
     let store = Store::open_in_memory().unwrap();
     assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 4);
+    assert_eq!(SCHEMA_VERSION, 5);
 }
 
 #[test]
@@ -81,7 +81,13 @@ fn schema_has_runs_tests_and_results() {
             &store,
             "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name"
         ),
-        ["results", "run_files", "runs", "tests"]
+        [
+            "report_memberships",
+            "results",
+            "run_files",
+            "runs",
+            "tests"
+        ]
     );
     assert_eq!(
         strings(
@@ -105,6 +111,13 @@ fn schema_has_runs_tests_and_results() {
             "SELECT name FROM pragma_table_info('run_files') ORDER BY cid"
         ),
         ["run_id", "position", "path"]
+    );
+    assert_eq!(
+        strings(
+            &store,
+            "SELECT name FROM pragma_table_info('report_memberships') ORDER BY cid"
+        ),
+        ["run_id", "namespace", "fingerprint_version", "digest"]
     );
     assert_eq!(
         strings(

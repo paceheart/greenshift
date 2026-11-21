@@ -5,8 +5,10 @@ use std::path::Path;
 
 use rusqlite::{config::DbConfig, params, Connection, OpenFlags};
 
+use super::{GroupOverlap, MergeReport};
 #[cfg(test)]
 use crate::junit::Outcome;
+use crate::report_key::ReportKey;
 use crate::store::{self, Store, APPLICATION_ID, SCHEMA_VERSION};
 use crate::tainted::Tainted;
 
@@ -15,7 +17,9 @@ mod frozen;
 mod text;
 
 use dictionary::{DictionaryBuilder, TestDictionary, TestId, TestKey};
-use frozen::{FrozenBytes, FrozenFiles, FrozenResults, FrozenRuns, ResultRow, Run, RunMetadata};
+use frozen::{
+    FrozenBytes, FrozenFiles, FrozenReports, FrozenResults, FrozenRuns, ResultRow, Run, RunMetadata,
+};
 use text::FrozenText;
 
 #[derive(Debug, thiserror::Error)]
@@ -80,6 +84,7 @@ struct RunBuilder {
     metadata: RunMetadataBuilder,
     files: Vec<(i64, FrozenBytes)>,
     results: Vec<ResultRow>,
+    reports: Vec<ReportKey>,
 }
 
 impl RunBuilder {
@@ -88,6 +93,7 @@ impl RunBuilder {
             self.metadata.freeze(),
             FrozenFiles::from_vec(self.files),
             FrozenResults::from_vec(self.results),
+            FrozenReports::from_vec(self.reports),
         )
     }
 }
@@ -302,6 +308,7 @@ fn load_connection(conn: &Connection, version: i64) -> Result<Data, SnapshotErro
                 metadata,
                 files: Vec::new(),
                 results: Vec::new(),
+                reports: Vec::new(),
             },
         );
     }
@@ -351,6 +358,33 @@ fn load_connection(conn: &Connection, version: i64) -> Result<Data, SnapshotErro
         }
         run.results
             .push(ResultRow::new(test, parsed_outcome, duration));
+    }
+    if version >= 5 {
+        let mut seen = BTreeSet::new();
+        let mut stmt = conn.prepare("SELECT run_id,namespace,fingerprint_version,digest FROM report_memberships ORDER BY run_id,namespace,fingerprint_version,digest")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            let namespace = borrowed_text(row, 1)?;
+            let report = ReportKey::new(namespace, row.get(2)?, borrowed_text(row, 3)?)
+                .map_err(|_| invalid("invalid report membership key"))?;
+            let run = runs
+                .get_mut(&id)
+                .ok_or_else(|| invalid("unknown run for report membership"))?;
+            let namespace_matches = match run.metadata.commit.as_ref() {
+                None => namespace.is_empty(),
+                Some(commit) => !namespace.is_empty() && commit.as_str() == namespace,
+            };
+            if !namespace_matches {
+                return Err(invalid(
+                    "report membership namespace disagrees with run commit",
+                ));
+            }
+            if !seen.insert(report.clone()) {
+                return Err(invalid("duplicate report membership"));
+            }
+            run.reports.push(report);
+        }
     }
     if version < 4 {
         for (id, identity) in store::legacy_run_identities(conn)? {
@@ -415,6 +449,9 @@ fn insert_data(conn: &Connection, data: &Data) -> Result<(), SnapshotError> {
         let metadata = run.metadata();
         conn.execute("INSERT INTO runs(commit_sha,source,ingested_at,partial,branch,tag,history_id) VALUES (?1,?2,?3,?4,?5,?6,?7)",params![metadata.commit().map(FrozenText::as_str),metadata.source().as_str(),metadata.at().as_str(),metadata.partial(),metadata.branch().map(FrozenText::as_str),metadata.tag().map(FrozenText::as_str),metadata.history_id().as_str()])?;
         let id = conn.last_insert_rowid();
+        for report in run.reports().as_slice() {
+            conn.execute("INSERT INTO report_memberships(run_id,namespace,fingerprint_version,digest) VALUES (?1,?2,?3,?4)", params![id,report.namespace(),report.version(),report.digest()])?;
+        }
         for (position, path) in run.files().iter() {
             conn.execute(
                 "INSERT INTO run_files(run_id,position,path) VALUES (?1,?2,?3)",
@@ -463,21 +500,25 @@ fn remap_runs(
             metadata: RunMetadataBuilder::from_frozen(run.metadata()),
             files,
             results,
+            reports: run.reports().as_slice().to_vec(),
         });
     }
     Ok(remapped)
 }
 
-/// Merge complete histories without treating SQLite's local row ids as identity.
-/// Durable run identities make publication idempotent while retaining independently
-/// recorded identical runs. Conflicting contents for one identity are rejected.
-pub fn merge(current: &Path, incoming: &Path, output: &Path) -> Result<(), SnapshotError> {
+/// Merge destination-first without treating SQLite's local row ids as identity.
+/// Genuine independent executions remain distinct. Keyed imports deduplicate by
+/// membership; entire partially overlapping incoming groups are excluded and
+/// reported. Conflicting contents for any shared retained identity are rejected.
+pub fn merge(current: &Path, incoming: &Path, output: &Path) -> Result<MergeReport, SnapshotError> {
     let data = load(current)?;
     let other = load(incoming)?;
-    write(&union(data, other)?, output)
+    let (data, report) = union(data, other)?;
+    write(&data, output)?;
+    Ok(report)
 }
 
-fn union(data: Data, other: Data) -> Result<Data, SnapshotError> {
+fn union(data: Data, other: Data) -> Result<(Data, MergeReport), SnapshotError> {
     let mut keys = BTreeSet::new();
     for key in data.tests.iter().chain(other.tests.iter()) {
         if !keys.contains(key) {
@@ -500,34 +541,530 @@ fn union(data: Data, other: Data) -> Result<Data, SnapshotError> {
     };
     let first = remap(&data.tests)?;
     let second = remap(&other.tests)?;
-    let merged = builder.freeze();
+    let mut merged = builder.freeze();
     let mut runs = remap_runs(&data.runs, &first, &merged)?;
     let incoming = remap_runs(&other.runs, &second, &merged)?;
     drop(data);
     drop(other);
-    drop(first);
     drop(second);
-    let mut additions = Vec::new();
+    let mut replay_only_tests = BTreeSet::new();
     {
         let known: HashMap<_, _> = runs
             .iter()
             .map(|run| (run.metadata.history_id.as_str(), run))
             .collect();
-        for run in incoming {
+        // Full equality for every retained shared UUID precedes any key skip.
+        for run in &incoming {
             match known.get(run.metadata.history_id.as_str()) {
-                Some(existing) if **existing != run => {
+                Some(existing) if **existing != *run => {
                     return Err(invalid("one run identity has conflicting contents"));
                 }
                 Some(_) => (),
-                None => additions.push(run),
+                None => (),
             }
         }
     }
-    runs.extend(additions);
-    Ok(Data {
-        tests: merged,
-        runs: freeze_runs(runs.into_iter()),
-    })
+    let retained_ids: BTreeSet<_> = runs
+        .iter()
+        .map(|run| run.metadata.history_id.clone())
+        .collect();
+    // This is the reverse-direction limitation, not an attempt to split or
+    // reconcile groups. In restore, these local groups cannot be fully merged
+    // back into the fetched source under its existing membership ownership.
+    let retained_groups = {
+        let source_keys: BTreeSet<_> = incoming.iter().flat_map(|run| run.reports.iter()).collect();
+        runs.iter()
+            .filter_map(|run| {
+                let seen = run
+                    .reports
+                    .iter()
+                    .filter(|key| source_keys.contains(*key))
+                    .count();
+                (seen != 0 && seen != run.reports.len()).then(|| {
+                    GroupOverlap::from_validated_id(
+                        run.metadata.history_id.as_str(),
+                        run.reports.len() - seen,
+                    )
+                })
+            })
+            .collect()
+    };
+    let mut excluded_groups = Vec::new();
+    let mut nonexact_replays = 0;
+    let mut metadata_replays = 0;
+    let mut owners: BTreeMap<ReportKey, usize> = BTreeMap::new();
+    for (index, run) in runs.iter().enumerate() {
+        for key in &run.reports {
+            owners.insert(key.clone(), index);
+        }
+    }
+    for run in incoming {
+        if retained_ids.contains(&run.metadata.history_id) {
+            continue;
+        }
+        if !run.reports.is_empty() {
+            let seen = run
+                .reports
+                .iter()
+                .filter(|key| owners.contains_key(*key))
+                .count();
+            if seen != 0 && seen != run.reports.len() {
+                excluded_groups.push(GroupOverlap::from_validated_id(
+                    run.metadata.history_id.as_str(),
+                    run.reports.len() - seen,
+                ));
+                replay_only_tests.extend(run.results.iter().map(|result| result.test().index()));
+                continue;
+            }
+            if seen == run.reports.len() {
+                let first = owners[&run.reports[0]];
+                let exact = runs[first].reports == run.reports;
+                if exact && runs[first].results != run.results {
+                    return Err(invalid("same report group has conflicting results"));
+                }
+                let metadata_changed = run.reports.iter().any(|key| {
+                    let metadata = &runs[owners[key]].metadata;
+                    (
+                        metadata.source.as_str(),
+                        metadata.partial,
+                        &metadata.branch,
+                        &metadata.tag,
+                    ) != (
+                        run.metadata.source.as_str(),
+                        run.metadata.partial,
+                        &run.metadata.branch,
+                        &run.metadata.tag,
+                    )
+                });
+                if metadata_changed {
+                    metadata_replays += 1;
+                }
+                if !exact {
+                    nonexact_replays += 1;
+                }
+                // Non-exact all-seen groups prove membership only, not aggregate
+                // equivalence. Destination grouping and all metadata stay intact.
+                replay_only_tests.extend(run.results.iter().map(|result| result.test().index()));
+                continue;
+            }
+        }
+        let index = runs.len();
+        for key in &run.reports {
+            owners.insert(key.clone(), index);
+        }
+        runs.push(run);
+    }
+    // Preserve every destination key, including historical unused entries. Also
+    // preserve keys needed by admitted observations and unrelated input metadata.
+    // Only names contributed exclusively by ignored replay results are omitted.
+    for test in &first {
+        replay_only_tests.remove(&test.index());
+    }
+    drop(first);
+    for run in &runs {
+        for result in &run.results {
+            replay_only_tests.remove(&result.test().index());
+        }
+    }
+    if !replay_only_tests.is_empty() {
+        let mut builder = DictionaryBuilder::default();
+        let mapping: Vec<_> = merged
+            .iter()
+            .enumerate()
+            .map(|(index, key)| {
+                if replay_only_tests.contains(&index) {
+                    None
+                } else {
+                    Some(builder.insert(key.clone()))
+                }
+            })
+            .collect();
+        for run in &mut runs {
+            for result in &mut run.results {
+                let test = mapping
+                    .get(result.test().index())
+                    .copied()
+                    .flatten()
+                    .ok_or_else(|| invalid("retained result missing from merged dictionary"))?;
+                *result = ResultRow::new(test, result.outcome(), result.duration());
+            }
+        }
+        merged = builder.freeze();
+    }
+    Ok((
+        Data {
+            tests: merged,
+            runs: freeze_runs(runs.into_iter()),
+        },
+        MergeReport::new(
+            excluded_groups,
+            retained_groups,
+            nonexact_replays,
+            metadata_replays,
+        ),
+    ))
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+    use crate::report_key::ReportKeySet;
+    use crate::store::NewRun;
+
+    fn record(path: &Path, reports: &[&str]) {
+        let mut store = Store::open(path).unwrap();
+        let mut cases = Vec::new();
+        for report in reports {
+            cases.extend(crate::junit::parse_str(report).unwrap().into_cases());
+        }
+        let keys = ReportKeySet::new(
+            reports
+                .iter()
+                .map(|report| ReportKey::from_bytes(None, report.as_bytes())),
+        )
+        .unwrap();
+        store
+            .record_import(
+                &NewRun {
+                    commit: None,
+                    source: "fixture",
+                    files: &[],
+                    partial: false,
+                    branch: None,
+                    tag: None,
+                },
+                &keys,
+                &cases,
+            )
+            .unwrap();
+    }
+
+    const A: &str = r#"<testsuite name="gears"><testcase name="turns" time="0.01"/></testsuite>"#;
+    const B: &str = r#"<testsuite name="gears"><testcase name="holds" time="0.02"/></testsuite>"#;
+
+    fn identities(path: &Path) -> Vec<String> {
+        Connection::open(path)
+            .unwrap()
+            .prepare("SELECT history_id FROM runs ORDER BY history_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn dictionary_rows(path: &Path) -> Vec<(String, String)> {
+        Connection::open(path)
+            .unwrap()
+            .prepare("SELECT suite,name FROM tests ORDER BY suite,name")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_import_snapshot_ignored_replay_does_not_retain_incoming_only_names() {
+        for spanning in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let destination = dir.path().join("destination");
+            let incoming = dir.path().join("incoming");
+            if spanning {
+                record(&destination, &[A]);
+                record(&destination, &[B]);
+                record(&incoming, &[A, B]);
+            } else {
+                record(&destination, &[A, B]);
+                record(&incoming, &[A]);
+            }
+            Connection::open(&destination)
+                .unwrap()
+                .execute(
+                    "INSERT INTO tests(suite,name) VALUES ('old-unused','keep-destination')",
+                    [],
+                )
+                .unwrap();
+            let mut expected = dictionary_rows(&destination);
+            let conn = Connection::open(&incoming).unwrap();
+            conn.execute(
+                "UPDATE tests SET name='ignored-replay-label' WHERE name='turns'",
+                [],
+            )
+            .unwrap();
+            // Unrelated existing dictionary metadata is not a historical cleanup
+            // target. Only payload contributed exclusively by ignored runs goes.
+            conn.execute(
+                "INSERT INTO tests(suite,name) VALUES ('orphan','keep-unrelated-input')",
+                [],
+            )
+            .unwrap();
+            drop(conn);
+            expected.push(("orphan".to_owned(), "keep-unrelated-input".to_owned()));
+            expected.sort();
+            let before_source = std::fs::read(&incoming).unwrap();
+            let before_ids = identities(&destination);
+            let output = dir.path().join("merged");
+            merge(&destination, &incoming, &output).unwrap();
+            assert_eq!(dictionary_rows(&output), expected);
+            assert_eq!(identities(&output), before_ids);
+            let restored = dir.path().join("restored");
+            std::fs::copy(&destination, &restored).unwrap();
+            restore_existing(&restored, &incoming, || false).unwrap();
+            assert_eq!(dictionary_rows(&restored), expected);
+            assert_eq!(identities(&restored), before_ids);
+            assert_eq!(std::fs::read(&incoming).unwrap(), before_source);
+        }
+    }
+
+    #[test]
+    fn test_import_snapshot_replay_name_shared_with_admitted_run_is_retained() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("destination");
+        let incoming = dir.path().join("incoming");
+        record(&destination, &[A, B]);
+        record(&incoming, &[A]);
+        Connection::open(&incoming)
+            .unwrap()
+            .execute("UPDATE tests SET name='admitted-label'", [])
+            .unwrap();
+        let report = crate::junit::parse_str(
+            r#"<testsuite name="gears"><testcase name="admitted-label"/></testsuite>"#,
+        )
+        .unwrap();
+        let mut store = Store::open(&incoming).unwrap();
+        store
+            .record_run(
+                &NewRun {
+                    commit: None,
+                    source: "admitted",
+                    files: &[],
+                    partial: false,
+                    branch: None,
+                    tag: None,
+                },
+                report.cases(),
+            )
+            .unwrap();
+        drop(store);
+        let output = dir.path().join("output");
+        merge(&destination, &incoming, &output).unwrap();
+        assert!(
+            dictionary_rows(&output).contains(&("gears".to_owned(), "admitted-label".to_owned()))
+        );
+        assert_eq!(identities(&output).len(), 2);
+    }
+
+    #[test]
+    fn test_import_snapshot_independent_exact_groups_dedupe_and_keep_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        record(&first, &[A, B]);
+        record(&second, &[B, A]);
+        let first_ids = identities(&first);
+        let second_ids = identities(&second);
+        assert_ne!(first_ids, second_ids);
+        for (destination, incoming, expected, name) in [
+            (&first, &second, &first_ids, "merged-first"),
+            (&second, &first, &second_ids, "merged-second"),
+        ] {
+            let output = dir.path().join(name);
+            merge(destination, incoming, &output).unwrap();
+            assert_eq!(&identities(&output), expected);
+            let data = load(&output).unwrap();
+            assert_eq!(
+                data.runs.iter().next().unwrap().reports().as_slice().len(),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn test_import_snapshot_partial_overlap_excludes_whole_group_and_reports_both_directions() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let combined = dir.path().join("combined");
+        let output = dir.path().join("output");
+        record(&first, &[A]);
+        record(&combined, &[A, B]);
+        let before = std::fs::read(&first).unwrap();
+        let incoming_before = std::fs::read(&combined).unwrap();
+        let first_ids = identities(&first);
+        let combined_ids = identities(&combined);
+        let report = merge(&first, &combined, &output).unwrap();
+        assert_eq!(report.excluded_groups().len(), 1);
+        assert_eq!(report.excluded_groups()[0].history_id(), combined_ids[0]);
+        assert_eq!(report.excluded_groups()[0].unseen_memberships(), 1);
+        assert_eq!(identities(&output), first_ids);
+        assert_eq!(std::fs::read(&first).unwrap(), before);
+        assert_eq!(std::fs::read(&combined).unwrap(), incoming_before);
+        let restored = restore_existing(&first, &combined, || false).unwrap();
+        assert_eq!(restored, report);
+        assert_eq!(identities(&first), first_ids);
+        assert_eq!(std::fs::read(&combined).unwrap(), incoming_before);
+        let reverse = merge(&combined, &first, &output).unwrap();
+        assert!(reverse.excluded_groups().is_empty());
+        assert_eq!(reverse.retained_groups().len(), 1);
+        assert_eq!(reverse.retained_groups()[0].history_id(), combined_ids[0]);
+        assert_eq!(reverse.retained_groups()[0].unseen_memberships(), 1);
+        assert_eq!(reverse.nonexact_replays(), 1);
+        assert_eq!(identities(&output), identities(&combined));
+    }
+
+    #[test]
+    fn test_import_snapshot_spanning_membership_keeps_existing_grouping() {
+        let dir = tempfile::tempdir().unwrap();
+        let split = dir.path().join("split");
+        let combined = dir.path().join("combined");
+        let output = dir.path().join("output");
+        record(&split, &[A]);
+        record(&split, &[B]);
+        record(&combined, &[A, B]);
+        merge(&split, &combined, &output).unwrap();
+        assert_eq!(identities(&output), identities(&split));
+        let reverse = dir.path().join("reverse");
+        merge(&combined, &split, &reverse).unwrap();
+        assert_eq!(identities(&reverse), identities(&combined));
+    }
+
+    #[test]
+    fn test_import_snapshot_exact_group_result_disagreement_rejects() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        record(&first, &[A]);
+        record(&second, &[A]);
+        Connection::open(&second)
+            .unwrap()
+            .execute("UPDATE results SET duration_ms=999", [])
+            .unwrap();
+        assert!(matches!(
+            merge(&first, &second, &dir.path().join("out")),
+            Err(SnapshotError::Invalid(
+                "same report group has conflicting results"
+            ))
+        ));
+    }
+
+    #[test]
+    fn test_import_snapshot_shared_retained_id_guard_precedes_report_skip() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        record(&first, &[A]);
+        std::fs::copy(&first, &second).unwrap();
+        Connection::open(&second)
+            .unwrap()
+            .execute("UPDATE runs SET source='different'", [])
+            .unwrap();
+        assert!(matches!(
+            merge(&first, &second, &dir.path().join("out")),
+            Err(SnapshotError::Invalid(
+                "one run identity has conflicting contents"
+            ))
+        ));
+    }
+
+    #[test]
+    fn test_import_snapshot_later_shared_id_conflict_aborts_before_partial_group_skip() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("destination");
+        let incoming = dir.path().join("incoming");
+        let output = dir.path().join("output");
+        record(&destination, &[A]);
+        Store::open(&destination)
+            .unwrap()
+            .record_run(
+                &NewRun {
+                    commit: None,
+                    source: "shared",
+                    files: &[],
+                    partial: false,
+                    branch: None,
+                    tag: None,
+                },
+                std::iter::empty(),
+            )
+            .unwrap();
+        record(&incoming, &[A, B]);
+        let connection = Connection::open(&incoming).unwrap();
+        connection
+            .execute(
+                "ATTACH DATABASE ?1 AS original",
+                [destination.to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO runs(commit_sha,source,ingested_at,partial,branch,tag,history_id)
+             SELECT commit_sha,'conflicting',ingested_at,partial,branch,tag,history_id
+             FROM original.runs WHERE source='shared'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        let before = std::fs::read(&destination).unwrap();
+        assert!(matches!(
+            merge(&destination, &incoming, &output),
+            Err(SnapshotError::Invalid(
+                "one run identity has conflicting contents"
+            ))
+        ));
+        assert!(!output.exists());
+        assert!(matches!(
+            restore_existing(&destination, &incoming, || false),
+            Err(SnapshotError::Invalid(
+                "one run identity has conflicting contents"
+            ))
+        ));
+        assert_eq!(std::fs::read(&destination).unwrap(), before);
+    }
+
+    #[test]
+    fn test_import_snapshot_restore_roundtrip_retains_membership_and_local_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original");
+        let exported = dir.path().join("exported");
+        let local = dir.path().join("local");
+        record(&original, &[A, B]);
+        record(&local, &[B, A]);
+        let local_ids = identities(&local);
+        snapshot(&original, &exported).unwrap();
+        restore_existing(&local, &exported, || false).unwrap();
+        assert_eq!(identities(&local), local_ids);
+        let conn = Connection::open(&local).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM report_memberships", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        drop(conn);
+        // Membership is actually read by the importer after transport, not only
+        // written into a table the intended consumer never reaches.
+        record(&local, &[A, B]);
+        assert_eq!(identities(&local), local_ids);
+    }
+
+    #[test]
+    fn test_import_snapshot_membership_namespace_must_match_owner() {
+        for commit in ["aaaaaaa", "", "legacy"] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = dir.path().join("db");
+            record(&db, &[A]);
+            Connection::open(&db)
+                .unwrap()
+                .execute("UPDATE runs SET commit_sha=?1", [commit])
+                .unwrap();
+            assert!(matches!(
+                validate(&db),
+                Err(SnapshotError::Invalid(
+                    "report membership namespace disagrees with run commit"
+                ))
+            ));
+        }
+    }
 }
 
 /// Import into the existing SQLite inode while excluding other SQLite writers.
@@ -536,7 +1073,7 @@ pub(crate) fn restore_existing(
     db: &Path,
     incoming: &Path,
     mut cancelled: impl FnMut() -> bool,
-) -> Result<(), SnapshotError> {
+) -> Result<MergeReport, SnapshotError> {
     restore_existing_transaction(db, incoming, &mut cancelled, |_, _| Ok(()))
 }
 
@@ -553,7 +1090,7 @@ fn restore_existing_transaction(
     incoming: &Path,
     cancelled: &mut impl FnMut() -> bool,
     mut observe: impl FnMut(RestoreCheckpoint, &Connection) -> Result<(), SnapshotError>,
-) -> Result<(), SnapshotError> {
+) -> Result<MergeReport, SnapshotError> {
     if cancelled() {
         return Err(SnapshotError::Cancelled);
     }
@@ -583,13 +1120,13 @@ fn restore_existing_transaction(
         let version = checked_connection_version(&tx)?;
         load_connection(&tx, version)?
     };
-    let data = union(local, incoming)?;
+    let (data, report) = union(local, incoming)?;
     if cancelled() {
         return Err(SnapshotError::Cancelled);
     }
     let canonical = store::canonical_schema(SCHEMA_VERSION)?;
     let definitions = schema(&canonical)?;
-    tx.execute_batch("DROP TABLE IF EXISTS results; DROP TABLE IF EXISTS run_files; DROP TABLE IF EXISTS runs; DROP TABLE IF EXISTS tests;")?;
+    tx.execute_batch("DROP TABLE IF EXISTS report_memberships; DROP TABLE IF EXISTS results; DROP TABLE IF EXISTS run_files; DROP TABLE IF EXISTS runs; DROP TABLE IF EXISTS tests;")?;
     for kind in ["table", "index"] {
         for (object_kind, _, _, sql) in &definitions {
             if object_kind == kind {
@@ -609,7 +1146,7 @@ fn restore_existing_transaction(
         return Err(SnapshotError::Cancelled);
     }
     tx.commit()?;
-    Ok(())
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -705,11 +1242,19 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let local = dir.path().join("local");
             let incoming = dir.path().join("incoming");
-            if version < 4 {
+            if version < SCHEMA_VERSION {
                 historical_fixture(&local, version);
             } else {
                 fixture(&local, "legacy");
             }
+            assert_eq!(
+                Connection::open(&local)
+                    .unwrap()
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .unwrap(),
+                version,
+                "restore fixture must exercise the named source schema"
+            );
             fixture(&incoming, "remote");
             let before = load(&local)
                 .unwrap()
@@ -1017,6 +1562,14 @@ mod tests {
             .unwrap();
         let output = Connection::open(path).unwrap();
         output.execute("INSERT INTO runs(id,source,ingested_at) VALUES (9,'legacy','2020-01-01T00:00:00.000Z')",[]).unwrap();
+        if version >= 4 {
+            output
+                .execute(
+                    "UPDATE runs SET history_id='00000000000000000000000000000009'",
+                    [],
+                )
+                .unwrap();
+        }
         output
             .execute("INSERT INTO tests VALUES (4,'suite','test')", [])
             .unwrap();
@@ -1042,6 +1595,13 @@ mod tests {
             let upgraded = Store::open_read_only(&output).unwrap().unwrap();
             assert_eq!(upgraded.schema_version().unwrap(), SCHEMA_VERSION);
             assert_eq!(upgraded.history(&[]).unwrap().runs().len(), 1);
+            let conn = Connection::open(&output).unwrap();
+            assert_eq!(
+                conn.query_row("SELECT count(*) FROM report_memberships", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
         }
     }
 
@@ -1055,7 +1615,16 @@ mod tests {
             .map(|object| object.1)
             .collect();
         tables.sort();
-        assert_eq!(tables, vec!["results", "run_files", "runs", "tests"]);
+        assert_eq!(
+            tables,
+            vec![
+                "report_memberships",
+                "results",
+                "run_files",
+                "runs",
+                "tests"
+            ]
+        );
         for (table, expected) in [
             (
                 "runs",
@@ -1076,6 +1645,10 @@ mod tests {
                 vec!["run_id", "test_id", "outcome", "duration_ms"],
             ),
             ("run_files", vec!["run_id", "position", "path"]),
+            (
+                "report_memberships",
+                vec!["run_id", "namespace", "fingerprint_version", "digest"],
+            ),
         ] {
             let columns = conn
                 .prepare(&format!("PRAGMA table_info({table})"))

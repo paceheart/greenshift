@@ -118,10 +118,11 @@ fn immutable_fixture(body: &str) -> String {
          #[path = {text:?}] mod text;\n\
          #[path = {dictionary:?}] mod dictionary;\n\
          #[path = {outcome:?}] mod junit;\n\
+         #[path = {report_key:?}] mod report_key;\n\
          #[path = {frozen:?}] mod frozen;\n\
          use text::FrozenText;\n\
          use dictionary::{{DictionaryBuilder,TestKey}};\n\
-         use frozen::{{FrozenBytes,FrozenFiles,FrozenResults,FrozenRuns,ResultRow,Run,RunMetadata}};\n\
+         use frozen::{{FrozenBytes,FrozenFiles,FrozenReports,FrozenResults,FrozenRuns,ResultRow,Run,RunMetadata}};\n\
          fn main() {{\n\
              let mut text = FrozenText::new(\"suite\".to_owned());\n\
              let mut builder = DictionaryBuilder::default();\n\
@@ -136,7 +137,12 @@ fn immutable_fixture(body: &str) -> String {
              let mut result = ResultRow::new(id,junit::Outcome::Passed,Some(12));\n\
              let mut results = FrozenResults::from_vec(vec![result]);\n\
              let mut metadata = RunMetadata::new(FrozenText::new(\"0123456789abcdef0123456789abcdef\".to_owned()),Some(text.clone()),text.clone(),text.clone(),0,Some(text.clone()),None);\n\
-             let mut run = Run::new(metadata.clone(),files.clone(),results.clone());\n\
+             let mut reports = FrozenReports::from_vec(vec![report_key::ReportKey::from_validated_parts(String::new(),\"0\".repeat(64))]);\n\
+             let mut report_keys = report_key::ReportKeySet::from_canonical(reports.as_slice().to_vec());\n\
+             assert_eq!(report_keys.keys(),reports.as_slice());\n\
+             assert_eq!(reports.as_slice().len(),1);\n\
+             assert_eq!(reports.as_slice()[0].namespace(),\"\");\n\
+             let mut run = Run::new(metadata.clone(),files.clone(),results.clone(),reports.clone());\n\
              let mut runs = FrozenRuns::from_vec(vec![run.clone()]);\n\
              assert_eq!(files.iter().next().unwrap().1.as_bytes(),&[255,0,128]);\n\
              assert_eq!(results.iter().count(),1);\n\
@@ -158,12 +164,14 @@ fn immutable_fixture(body: &str) -> String {
              assert!(run.metadata().tag().is_none());\n\
              assert_eq!(run.files(),&files);\n\
              assert_eq!(run.results(),&results);\n\
+             assert_eq!(run.reports(),&reports);\n\
              assert_eq!(runs.iter().next().unwrap(),&run);\n\
              {body}\n\
          }}\n",
         text = root.join("text.rs").to_str().unwrap(),
         dictionary = root.join("dictionary.rs").to_str().unwrap(),
         outcome = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/junit/outcome.rs"),
+        report_key = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/report_key/payload.rs"),
         frozen = root.join("frozen.rs").to_str().unwrap(),
     )
 }
@@ -204,6 +212,29 @@ fn immutable_text_and_dictionary_reject_actual_mutation_after_valid_setup() {
         ("files.iter_mut();", "error[E0599]"),
         ("results.iter_mut();", "error[E0599]"),
         ("runs.iter_mut();", "error[E0599]"),
+        (
+            "reports.as_slice()[0]=report_key::ReportKey::from_validated_parts(String::new(),\"1\".repeat(64));",
+            "error[E0594]",
+        ),
+        (
+            "reports.0[0]=report_key::ReportKey::from_validated_parts(String::new(),\"1\".repeat(64));",
+            "error[E0616]",
+        ),
+        (
+            "reports.as_slice()[0].digest().make_ascii_uppercase();",
+            "error[E0596]",
+        ),
+        ("run.reports=reports.clone();", "error[E0616]"),
+        (
+            "report_keys.keys()[0]=report_key::ReportKey::from_validated_parts(String::new(),\"1\".repeat(64));",
+            "error[E0594]",
+        ),
+        (
+            "report_keys.namespace().make_ascii_uppercase();",
+            "error[E0596]",
+        ),
+        ("report_keys.keys.clear();", "error[E0616]"),
+        ("*run.reports()=reports.clone();", "error[E0594]"),
         (
             "std::sync::Arc::make_mut(&mut bytes.0)[0]=1;",
             "error[E0616]",

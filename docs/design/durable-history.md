@@ -1,7 +1,8 @@
-<!-- design-meta: status=implemented-repair-review-pending; last-updated=2026-11-20; phase=implementation -->
+<!-- design-meta: status=implemented-repair-review-pending; last-updated=2026-11-21; phase=implementation -->
 # Durable history
 
-`refs/greenshift/history` is the canonical complete database. Each publication
+`refs/greenshift/history` is the canonical full-database snapshot of published
+history, not a promise that every source observation was admitted. Each publication
 replaces a parentless commit containing exactly `history.sqlite.gz`. Reachable
 history is bounded to the current snapshot. Replaced objects remain subject to
 the forge's garbage collection and retention; this does not promise bounded
@@ -19,7 +20,8 @@ greenshift run nextest --history-remote URL --history-artifact PATH
 ```
 
 `run` is opt-in: existing local runs are unchanged. Restore merges fetched history
-with an existing local store, preserving unpublished local runs. It happens before test
+with an existing local store, preserving its destination runs and admitting
+nonconflicting incoming observations under the membership rules below. It happens before test
 listing; unavailable canonical history runs all tests as rich. Recording remains
 best-effort and the artifact is written after recording even when tests fail.
 Storage errors emit `⚠` and preserve the test result. Explicit history commands
@@ -55,8 +57,10 @@ handler. Test-runner listing/build/run children do not inherit
 
 ## Published data and audience
 
-Snapshots preserve complete recorded history, including `run_files.path` exactly
-as ingested. Absolute JUnit paths can contain workstation usernames or other
+Snapshots preserve destination history and admitted incoming observations,
+including `run_files.path` exactly as ingested. Keyed replays and conflicting
+incoming groups follow the schema-5 rules below; not every source observation is
+necessarily transferred. Absolute JUnit paths can contain workstation usernames or other
 host-specific information; anyone with repository access can read that metadata
 from the durable ref. Audit the destination audience before publishing. Ingest
 relative JUnit paths when absolute paths should not be shared. The snapshot does
@@ -175,7 +179,8 @@ runs are numbered in `(ingested_at, history_id)` order: this is deterministic
 recorded-time ordering, not proof of actual execution chronology. Timestamp ties
 do not merge independent run identities.
 
-Each publish fetches and validates current history, merges by durable identity,
+Each publish fetches and validates current history, checks shared durable
+identities and then merges by report membership as described below,
 and uses an exact `--force-with-lease` compare-and-swap. Rejection refetches,
 remerges and retries once. A second rejection warns. Workflow concurrency reduces
 collisions but is not the correctness lock, and pending workflow cancellation is
@@ -184,6 +189,72 @@ that lose both attempts are best-effort: no later publisher automatically reads
 the failed run's artifact. It can be replayed manually only while retained (one
 day in the reference workflow). Durable pending delivery/replay is separate work;
 already-published canonical history remains protected by CAS.
+
+## Schema 5 report memberships
+
+Migration 5 adds immutable report memberships: a versioned fingerprint of exact
+report bytes and the optional normalized textual commit namespace. Paths, input
+order, timestamps and source/partial/ref metadata are not import identity. Legacy
+runs remain unkeyed because their original report bytes are unavailable. Genuine
+executions are also unkeyed and stay distinct, even when their reports match.
+
+Local `ingest` is strict and atomic: none seen records one aggregate, all seen
+acknowledges a replay, and some seen plus unseen reports fails without inserting
+anything. Repeated bytes within a fresh bundle collapse before aggregation.
+First grouping/provenance wins; metadata-only retries never upgrade a partial
+run. Exact-group result disagreement is an error. Subset/spanning all-seen
+replays establish membership only, not aggregate-result equivalence.
+
+Transport is destination-authoritative and best-effort. Publication's destination
+is canonical remote history; restore's destination is the existing local store.
+Every shared retained run identity is compared in full **before** deduplication or
+group exclusion. Unequal shared identities, malformed data and exact-group result
+conflicts remain hard errors, leaving the destination/ref unchanged.
+
+If an incoming keyed group partly overlaps destination memberships, the entire
+incoming group is excluded. Its files/results/memberships are not split or
+relabelled as an unkeyed execution. All destination runs and admissible unrelated
+incoming runs remain. Names used only by excluded results are omitted from the
+output dictionary; destination-only unused names and unrelated incoming names
+remain. Source files are unchanged when the merge output is distinct; existing
+local restore intentionally updates its destination transactionally.
+
+For example, remote D{A} and local I{A,B}+U publish D+U, excluding I. Restore may
+retain local I and add U without reconciling its grouping. Later publications
+continue admitting unrelated runs but exclude I again. In the reverse direction,
+restoring remote I{A,B} into local D{A}+U excludes I locally; publishing back keeps
+canonical I and admits U, treating D as a membership-only subset replay. Neither
+direction double-counts A or reconstructs B from aggregate A+B results.
+
+Snapshot merge returns an immutable `MergeReport`. Reports identify
+excluded groups by validated opaque history ID and number of unseen memberships,
+plus retained destination groups that partially overlap the source.
+`Remote::publish` returns `PublishOutcome`: `oid()` is the committed OID and
+`report()` is the **final successful CAS attempt's** report. `Remote::restore`
+returns `RestoreOutcome::Missing` or `Restored(MergeReport)`, distinguishing
+missing history from a committed restore with limitations.
+CLI history commands and the runner's restore path render these limitations.
+
+Publication still emits its OID and keeps CI nonblocking, but warns explicitly
+that an excluded group was **not published**: its unseen memberships remain only
+in the source artifact, not the canonical snapshot, with no automatic recovery.
+Restore warns that excluded groups were **not restored locally** and remain in
+the incoming source. It also identifies retained local groups that can be
+excluded when publishing back: successful restore did not reconcile them. No
+warning dumps suites, test names, paths or raw report contents. This is not a
+durable pending-delivery guarantee; eventual recovery is separate work in
+[#30](https://github.com/paceheart/greenshift/issues/30).
+
+Every writer-opened store and exported snapshot uses schema 5, even for unkeyed
+executions. Read-only opens and export do not migrate their input. Upgrade all
+writers/importers/runners and trusted publishers sharing a store/ref together.
+Generated workflows use one release/checksum pin for both jobs; regenerating with
+`--force` updates them together. A stale or downgraded schema-4 pin can leave CI
+green while warning `unsupported snapshot schema version` and
+`History was not published`; its publisher emits no OID and that run's artifact
+has no automatic recovery. Move forward to compatible binaries, never strip
+memberships or downgrade the database to silence the warning. Tag/checksum format
+validation cannot establish a chosen binary's schema support.
 
 ## Forgejo capability gate
 

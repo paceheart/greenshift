@@ -52,6 +52,9 @@ impl History {
 
     fn ingest_with(&mut self, xml: &str, source: &str, extra: &[&str]) {
         self.runs += 1;
+        // These fixtures represent distinct observations, not retries of one
+        // report. Give each a distinct commit even when the XML is identical.
+        let commit = format!("{:07x}", self.runs);
         let file = self.dir.path().join(format!("run{}.xml", self.runs));
         std::fs::write(&file, xml).unwrap();
         greenshift()
@@ -59,6 +62,7 @@ impl History {
             .arg("--db")
             .arg(&self.db)
             .args(["--source", source])
+            .args(["--commit", &commit])
             .args(extra)
             .arg(&file)
             .assert()

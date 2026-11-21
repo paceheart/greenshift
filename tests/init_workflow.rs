@@ -285,6 +285,28 @@ fn sha256_hex(data: &[u8]) -> String {
         .collect()
 }
 
+#[test]
+fn both_jobs_inherit_one_release_and_checksum_pin_without_overrides() {
+    let checksum = "a".repeat(64);
+    for forge in forges() {
+        let workflow = generated(forge, &checksum, &[]);
+        assert_eq!(workflow["env"]["GREENSHIFT_RELEASE"], RELEASE);
+        assert_eq!(workflow["env"]["GREENSHIFT_SHA256"], checksum);
+        for job in ["test", "publish"] {
+            for key in ["GREENSHIFT_RELEASE", "GREENSHIFT_SHA256"] {
+                assert!(workflow["jobs"][job]["env"][key].is_null());
+                for step in steps(&workflow, job) {
+                    assert!(step["env"][key].is_null(), "{forge} {job}: {key} override");
+                }
+            }
+        }
+        assert_eq!(
+            step(&workflow, "test", "Install pinned greenshift release")["run"],
+            step(&workflow, "publish", "Install pinned greenshift release")["run"]
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn the_install_step_fails_closed_on_a_checksum_mismatch() {
