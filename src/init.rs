@@ -35,6 +35,10 @@ pub mod nextest;
 /// a workflow pinned to it, or to anything older, could not work.
 pub const LAST_RELEASE_WITHOUT_HISTORY: (u64, u64, u64) = (0, 1, 0);
 
+/// The last published release without `run lein`: a lein workflow pinned
+/// to it, or to anything older, could not work.
+pub const LAST_RELEASE_WITHOUT_LEIN: (u64, u64, u64) = (0, 2, 0);
+
 /// The forges `init` writes a CI workflow for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Forge {
@@ -129,6 +133,15 @@ pub struct Release {
 impl Release {
     pub fn as_str(&self) -> &str {
         &self.tag
+    }
+
+    /// The release's `(major, minor, patch)`.
+    pub fn version(&self) -> (u64, u64, u64) {
+        let mut parts = self.tag[1..]
+            .split('.')
+            .map(|part| part.parse().expect("a release tag is checked"));
+        let mut next = || parts.next().expect("a release tag has three parts");
+        (next(), next(), next())
     }
 }
 
@@ -473,6 +486,10 @@ mod tests {
         for ok in ["v0.1.1", "v0.2.0", "v1.0.0", "v10.20.30"] {
             assert_eq!(ok.parse::<Release>().unwrap().as_str(), ok);
         }
+        assert_eq!(
+            "v10.20.30".parse::<Release>().unwrap().version(),
+            (10, 20, 30)
+        );
         for bad in [
             "",
             "v",

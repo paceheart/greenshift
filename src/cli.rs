@@ -648,6 +648,17 @@ pub fn init_lein(args: &InitLeinArgs, root: &std::path::Path) -> anyhow::Result<
             );
             return Ok(ExitCode::from(2));
         }
+        (Some(Forge::Github), Some(release), _)
+            if release.version() <= init::LAST_RELEASE_WITHOUT_LEIN =>
+        {
+            let (major, minor, patch) = init::LAST_RELEASE_WITHOUT_LEIN;
+            eprintln!(
+                "greenshift: usage error: --release {}: v{major}.{minor}.{patch} and earlier \
+                 have no `run lein`; pin a later release",
+                release.as_str()
+            );
+            return Ok(ExitCode::from(2));
+        }
         (Some(Forge::Github), Some(release), Some(sha256)) => Some((release, sha256)),
         (Some(Forge::Github), ..) => {
             eprintln!("greenshift: usage error: --ci needs --release and --sha256");

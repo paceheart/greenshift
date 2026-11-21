@@ -613,7 +613,7 @@ in the project's root and commit what it changes:
   project's own test workflow, which it leaves alone, and runs on pushes
   and by hand, not on pull requests. `--release` and `--sha256` pin the
   greenshift release as for `init nextest`, and are required with
-  `--ci`.
+  `--ci`; the release must be one with `run lein`, later than v0.2.0.
 
 Nothing else: no reporter in the repository, no profile and nothing in
 `~/.lein`. It prints what it changed; a second run changes nothing and

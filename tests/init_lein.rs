@@ -252,6 +252,9 @@ fn ci_options_need_ci_and_ci_needs_its_pin() {
         &["--ci", "--release", RELEASE],
         &["--ci", "--sha256", SHA256],
         &["--ci", "forgejo", "--release", RELEASE, "--sha256", SHA256],
+        // Releases up to v0.2.0 have no `run lein`.
+        &["--ci", "--release", "v0.2.0", "--sha256", SHA256],
+        &["--ci", "--release", "v0.1.1", "--sha256", SHA256],
     ] {
         init(dir.path(), args).assert().code(2);
     }
