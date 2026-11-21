@@ -285,6 +285,67 @@ fn durable_ref_restored_before_plan_in_real_run() {
 }
 
 #[test]
+fn durable_restore_grouping_limitation_is_reported_by_the_real_runner() {
+    let project = Project::new();
+    let a = project.dir.path().join("a.xml");
+    let b = project.dir.path().join("b.xml");
+    for (path, name) in [(&a, "a"), (&b, "b")] {
+        std::fs::write(
+            path,
+            format!("<testsuite name=\"gears\"><testcase name=\"{name}\"/></testsuite>"),
+        )
+        .unwrap();
+    }
+    let remote_db = project.dir.path().join("remote.sqlite");
+    for (database, files, source) in [
+        (&remote_db, vec![&a], "remote-seed"),
+        (&project.db, vec![&a, &b], "local-seed"),
+    ] {
+        Command::cargo_bin("greenshift")
+            .unwrap()
+            .env_remove("GREENSHIFT_HISTORY_TOKEN")
+            .args(["ingest", "--db"])
+            .arg(database)
+            .args(["--commit", "abcdef1", "--source", source])
+            .args(files)
+            .assert()
+            .success();
+    }
+    let retained_id: String = Connection::open(&project.db)
+        .unwrap()
+        .query_row(
+            "SELECT history_id FROM runs WHERE source='local-seed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let repository = project.dir.path().join("remote.git");
+    assert!(std::process::Command::new("git")
+        .args(["init", "--bare"])
+        .arg(&repository)
+        .output()
+        .unwrap()
+        .status
+        .success());
+    greenshift::history::Remote::new(repository.to_str().unwrap())
+        .unwrap()
+        .publish(&remote_db, None)
+        .unwrap();
+    let output = project.run(&["--history-remote", repository.to_str().unwrap()], &[]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let diagnostics = stderr(&output);
+    assert!(
+        diagnostics.contains(&retained_id) && diagnostics.contains("did not reconcile"),
+        "{diagnostics}"
+    );
+    let runs = project.runs();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].source, "local-seed");
+    assert_eq!(runs[1].source, "nextest");
+    assert_eq!(runs[1].results.len(), 5);
+}
+
+#[test]
 fn a_fresh_store_runs_every_test_and_records_one_run() {
     let p = Project::new();
     let out = p.run(&["--commit", "ABCDEF1", "--", "--no-fail-fast"], &["gamma"]);

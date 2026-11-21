@@ -72,6 +72,39 @@ fn the_run_is_recorded_as_from_its_source() {
 }
 
 #[test]
+fn test_record_identical_execution_reports_create_distinct_unkeyed_observations() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("execution.xml");
+    let xml = r#"<testsuite name="gears"><testcase name="turns" time="0.012"/></testsuite>"#;
+    std::fs::write(&file, xml).unwrap();
+    let database = directory.path().join("history.sqlite");
+    let opts = options(&[
+        "--db",
+        database.to_str().unwrap(),
+        "--commit",
+        "abcdef1",
+        "--branch",
+        "fixture",
+    ]);
+    // The real runner adapter must record executions, not import retries.
+    // Keep the file bytes and commit identical across both calls.
+    record(&opts, "nextest", std::slice::from_ref(&file));
+    record(&opts, "nextest", std::slice::from_ref(&file));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), xml);
+    let connection = rusqlite::Connection::open(database).unwrap();
+    let counts: (i64, i64, i64, i64) = connection
+        .query_row(
+            "SELECT count(*), count(DISTINCT history_id),
+             (SELECT count(*) FROM results),
+             (SELECT count(*) FROM report_memberships) FROM runs",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(counts, (2, 2, 2, 0));
+}
+
+#[test]
 fn a_store_that_cannot_be_read_plans_every_test_rich() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("history.sqlite");

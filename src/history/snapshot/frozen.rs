@@ -5,6 +5,7 @@ use std::sync::Arc;
 use super::dictionary::TestId;
 use super::text::FrozenText;
 use crate::junit::Outcome;
+use crate::report_key::ReportKey;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct ResultRow {
@@ -91,14 +92,21 @@ pub(super) struct Run {
     metadata: RunMetadata,
     files: FrozenFiles,
     results: FrozenResults,
+    reports: FrozenReports,
 }
 
 impl Run {
-    pub(super) fn new(metadata: RunMetadata, files: FrozenFiles, results: FrozenResults) -> Self {
+    pub(super) fn new(
+        metadata: RunMetadata,
+        files: FrozenFiles,
+        results: FrozenResults,
+        reports: FrozenReports,
+    ) -> Self {
         Self {
             metadata,
             files,
             results,
+            reports,
         }
     }
     pub(super) fn metadata(&self) -> &RunMetadata {
@@ -109,6 +117,22 @@ impl Run {
     }
     pub(super) fn results(&self) -> &FrozenResults {
         &self.results
+    }
+    pub(super) fn reports(&self) -> &FrozenReports {
+        &self.reports
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct FrozenReports(Box<[ReportKey]>);
+
+impl FrozenReports {
+    pub(super) fn from_vec(mut reports: Vec<ReportKey>) -> Self {
+        reports.sort();
+        Self(reports.into_boxed_slice())
+    }
+    pub(super) fn as_slice(&self) -> &[ReportKey] {
+        &self.0
     }
 }
 

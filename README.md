@@ -18,7 +18,9 @@ greenshift ingest <JUNIT_XML>... [--db PATH] [--commit SHA] [--source NAME]
                   [--branch NAME | --tag NAME] [--partial]
 ```
 
-Every file given in one invocation is recorded as one run. For example, with
+A bundle of previously unseen unique reports is recorded as one aggregate run.
+Repeated files collapse; an all-seen bundle is a no-op, while mixing seen and
+unseen reports conflicts without recording anything. For example, with
 cargo-nextest's JUnit output turned on in `.config/nextest.toml`:
 
 ```toml
@@ -60,6 +62,56 @@ greenshift ingest target/nextest/default/junit.xml \
   of several when another wrote no JUnit, say. `select` never counts a
   partial run as full, whatever its size; its results still count towards
   `--min-runs`.
+- Imports are idempotent per report: the key is SHA-256 of its exact bytes
+  together with the normalized textual `--commit`. Paths and file order do
+  not enter the key; repeated identical files in one invocation count once.
+  Byte-different XML is distinct even when its parsed tests are equal.
+  Without `--commit`, all imports share one unknown-commit namespace.
+  Abbreviated and full commit strings remain distinct; no Git lookup occurs.
+- When every report is new, all files form one run. When every report was
+  already imported, greenshift reports `already recorded` without adding
+  another observation or changing the original grouping, time or metadata.
+  Changed source/partial/branch/tag metadata produces a warning and retains
+  the first values: a retry cannot upgrade a partial run to full. When only
+  some reports are already present, the whole import fails with an overlap
+  error rather than double-counting old reports or dropping unseen ones.
+- Grouping is first-recorded, not regrouped on replay. Importing A then B
+  separately, then A+B, keeps two runs; fresh A+B makes one. Importing A
+  then A+B conflicts; A+B then A is an already-present subset. Subset or
+  spanning-group replays check membership only: per-report contributions
+  cannot be recovered from aggregate results, so aggregate equivalence is
+  not independently verified. Exact-group replays with disagreeing stored
+  results fail. Report fingerprints supplied by a transported database are
+  producer claims, not proof a test executed or unavailable XML was genuine.
+- `ingest` imports reports; it does not infer new executions. The CI helper
+  `scripts/record-history.sh` follows these same import rules, so separate CI
+  executions with identical report bytes and commit can be retries. First-class
+  `run nextest` records every actual execution separately, even with identical
+  reports. Older history has no raw report fingerprints and stays unkeyed;
+  its first new keyed import may coexist with an equivalent legacy observation.
+- Stores opened for writing and exported snapshots use schema 5, even for
+  unkeyed executions. Read-only opens and snapshot export do not migrate
+  their input. Upgrade every importer, runner and trusted
+  publisher sharing the store or history ref together; older binaries reject
+  newer stores. Do not
+  downgrade or strip the membership table to make an old publisher accept it.
+  A stale or rolled-back CI pin can leave the job green while printing
+  ⚠ warnings containing `unsupported snapshot schema version` and
+  `History was not published`: history publication stops and that run's artifact
+  is not recovered automatically. Move the pin forward to a schema-5-capable release; do not
+  downgrade the database.
+  Membership survives snapshot export, merge and restore. Publication keeps
+  the remote destination's grouping/provenance; restore into an existing store
+  keeps the local destination's. Unlike strict local imports, transport excludes
+  an entire partially overlapping incoming group, warns with its opaque history
+  ID, and still transfers unrelated runs. It neither splits aggregates nor counts
+  overlapping reports twice. After publication, that group's unseen reports
+  remain only in the source artifact, not the canonical snapshot; there is no
+  automatic recovery. After restore, excluded remote groups remain in the source
+  rather than the local store. A retained local grouping can still be excluded
+  by the next publication: successful restore does not reconcile that conflict.
+  [Durable history](docs/design/durable-history.md#schema-5-report-memberships)
+  describes the typed outcomes and limitations.
 - greenshift's messages show what was given on the command line (paths,
   and in usage errors a rejected value or an unexpected argument or
   subcommand) with control characters and backslashes escaped as in
@@ -401,6 +453,14 @@ For example, to pin v0.2.0 (its `.sha256` file gives this checksum):
 greenshift init nextest --release v0.2.0 \
   --sha256 36a30034902f29885c9763d868aae1ea773ca79ddc710465c025a9f4c524074b
 ```
+
+That example pins a schema-4 release. Before writing or publishing schema-5
+history, upgrade all its writers and trusted publishers
+to a schema-5-capable release. Regenerate installed workflows with that
+release's independently checked checksum and `--force`. Init validates the
+tag and checksum format, not the downloaded binary's schema support. Both
+jobs use the same pin; do not substitute a publisher built by the test job
+or strip report memberships to make an older publisher accept the database.
 
 `init nextest` sets a cargo-nextest repository up to run `greenshift run
 nextest` in CI with [durable history](docs/design/durable-history.md), in

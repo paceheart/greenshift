@@ -65,6 +65,31 @@ fn help_describes_the_tool() {
         .stdout(predicate::str::contains("Usage: greenshift"));
 }
 
+#[test]
+fn ingest_help_distinguishes_new_replayed_and_overlapping_bundles() {
+    for args in [vec!["--help"], vec!["ingest", "--help"]] {
+        let output = greenshift()
+            .args(args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let help = String::from_utf8(output).unwrap();
+        let normalized = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            normalized.contains("all-new JUnit reports as one aggregate run"),
+            "{help}"
+        );
+        assert!(normalized.contains("all-seen replays no-op"), "{help}");
+        assert!(
+            normalized.contains("mixing seen/unseen reports fails without recording"),
+            "{help}"
+        );
+        assert!(!normalized.contains("all as one run"), "{help}");
+    }
+}
+
 /// A name holding a terminal escape and a newline, and how greenshift
 /// shows it.
 const EVIL: &str = "\u{1b}[31mred\nline";

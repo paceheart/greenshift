@@ -56,6 +56,7 @@ fn independently_migrated_legacy_copies_keep_the_same_durable_run_identity() {
             "INSERT INTO runs(commit_sha,source,ingested_at,partial,branch,tag,history_id)
                  SELECT commit_sha,source,ingested_at,partial,branch,tag,lower(hex(randomblob(16))) FROM runs;
              INSERT INTO results SELECT 2,test_id,outcome,duration_ms FROM results;
+             DROP TABLE report_memberships;
              DROP INDEX runs_by_history_id;
              ALTER TABLE runs DROP COLUMN history_id;
              PRAGMA user_version=3;",
@@ -118,7 +119,7 @@ fn fifty_thousand_rows_restore_from_ref_after_every_cache_entry_is_deleted() {
         .publish(&input, Some(&cache))
         .unwrap();
     let publish = start.elapsed();
-    assert!(cache.join(&published).is_dir());
+    assert!(cache.join(published.oid()).is_dir());
     std::fs::remove_dir_all(&cache).unwrap();
     std::fs::remove_file(&input).unwrap();
     assert!(!cache.exists());
@@ -128,7 +129,10 @@ fn fifty_thousand_rows_restore_from_ref_after_every_cache_entry_is_deleted() {
     // compressed DB is the only remaining source of these result rows.
     let reader = Remote::new(url).unwrap();
     let start = Instant::now();
-    assert!(reader.restore(&restored, Some(&cache)).unwrap());
+    assert!(matches!(
+        reader.restore(&restored, Some(&cache)).unwrap(),
+        greenshift::history::RestoreOutcome::Restored(_)
+    ));
     let restore = start.elapsed();
     let start = Instant::now();
     let store = Store::open_read_only(&restored).unwrap().unwrap();

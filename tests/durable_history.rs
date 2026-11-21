@@ -1,9 +1,13 @@
 use std::path::Path;
 use std::process::Command;
 
-use greenshift::history::Remote;
+use greenshift::history::{Remote, RestoreOutcome};
 use greenshift::store::{NewRun, Store};
 use rusqlite::Connection;
+
+#[cfg(unix)]
+#[path = "common/history_cas.rs"]
+mod history_cas;
 
 fn repository(path: &Path) {
     assert!(Command::new("git")
@@ -49,13 +53,20 @@ fn publish_then_wipe_cache_restores_every_run_without_rebuild() {
     record(&data, "second");
     let cache = dir.path().join("cache");
     let remote = Remote::new(repo.to_str().unwrap()).unwrap();
-    let oid = remote.publish(&data, Some(&cache)).unwrap();
+    let oid = remote
+        .publish(&data, Some(&cache))
+        .unwrap()
+        .oid()
+        .to_owned();
     assert_eq!(remote.head().unwrap(), Some(oid));
     record(&data, "third");
     remote.publish(&data, Some(&cache)).unwrap();
     std::fs::remove_dir_all(cache).unwrap();
     let restored = dir.path().join("restored.sqlite");
-    assert!(remote.restore(&restored, None).unwrap());
+    assert!(matches!(
+        remote.restore(&restored, None).unwrap(),
+        RestoreOutcome::Restored(_)
+    ));
     assert_eq!(count(&restored), 3);
     // A replacement commit has no parents: one live full snapshot, not a log.
     let parents = Command::new("git")
@@ -112,7 +123,7 @@ fn corrupt_or_substituted_cache_falls_back_to_ref_and_tampered_artifact_cannot_p
     record(&db, "real");
     let remote = Remote::new(repo.to_str().unwrap()).unwrap();
     let cache = dir.path().join("cache");
-    let oid = remote.publish(&db, Some(&cache)).unwrap();
+    let oid = remote.publish(&db, Some(&cache)).unwrap().oid().to_owned();
     std::fs::write(cache.join(&oid).join("history.sqlite.gz"), b"not a gzip").unwrap();
     let restored = dir.path().join("read.sqlite");
     remote.restore(&restored, Some(&cache)).unwrap();
@@ -286,7 +297,7 @@ fn healthy_authenticated_cache_restores_when_fetch_is_disabled_and_special_cache
     record(&db, "real");
     let cache = dir.path().join("cache");
     let remote = Remote::new(repo.to_str().unwrap()).unwrap();
-    let oid = remote.publish(&db, Some(&cache)).unwrap();
+    let oid = remote.publish(&db, Some(&cache)).unwrap().oid().to_owned();
     let wrapper = dir.path().join("bin");
     std::fs::create_dir(&wrapper).unwrap();
     std::fs::write(wrapper.join("git"),"#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = fetch ]; then exit 99; fi; done\nexec \"$REAL_GIT\" \"$@\"\n").unwrap();
@@ -350,7 +361,11 @@ fn cache_named_after_ref_cannot_substitute_another_valid_database() {
     record(&other, "substitute");
     let cache = dir.path().join("cache");
     let remote = Remote::new(repo.to_str().unwrap()).unwrap();
-    let oid = remote.publish(&canonical, Some(&cache)).unwrap();
+    let oid = remote
+        .publish(&canonical, Some(&cache))
+        .unwrap()
+        .oid()
+        .to_owned();
     let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     gzip.write_all(&std::fs::read(&other).unwrap()).unwrap();
     std::fs::write(
@@ -464,7 +479,7 @@ fn exact_history_ref_ignores_suffix_matching_branch_and_restore_keeps_local_runs
     let local = dir.path().join("local");
     record(&local, "unsaved-local");
     let remote = Remote::new(repo.to_str().unwrap()).unwrap();
-    let oid = remote.publish(&canonical, None).unwrap();
+    let oid = remote.publish(&canonical, None).unwrap().oid().to_owned();
     assert!(Command::new("git")
         .arg("--git-dir")
         .arg(&repo)
@@ -473,9 +488,15 @@ fn exact_history_ref_ignores_suffix_matching_branch_and_restore_keeps_local_runs
         .unwrap()
         .success());
     assert_eq!(remote.head().unwrap(), Some(oid.clone()));
-    assert!(remote.restore(&local, None).unwrap());
+    assert!(matches!(
+        remote.restore(&local, None).unwrap(),
+        RestoreOutcome::Restored(_)
+    ));
     assert_eq!(count(&local), 2);
-    assert!(remote.restore(&local, None).unwrap());
+    assert!(matches!(
+        remote.restore(&local, None).unwrap(),
+        RestoreOutcome::Restored(_)
+    ));
     assert_eq!(count(&local), 2);
     assert_eq!(remote.head().unwrap(), Some(oid));
 }
@@ -498,7 +519,10 @@ fn restore_updates_the_existing_sqlite_file_without_retiring_open_connections() 
     assert_eq!(observed_count(), 1);
     let remote = Remote::new(repo.to_str().unwrap()).unwrap();
     remote.publish(&canonical, None).unwrap();
-    assert!(remote.restore(&local, None).unwrap());
+    assert!(matches!(
+        remote.restore(&local, None).unwrap(),
+        RestoreOutcome::Restored(_)
+    ));
 
     // An idle connection must observe the same committed union as a newly
     // opened connection, rather than remain attached to an unlinked old DB.
@@ -526,7 +550,7 @@ fn landed_push_keeps_success_oid_when_local_cache_cannot_be_written() {
     let cache = dir.path().join("not-a-directory");
     std::fs::write(&cache, b"preserve").unwrap();
     let remote = Remote::new(repo.to_str().unwrap()).unwrap();
-    let oid = remote.publish(&db, Some(&cache)).unwrap();
+    let oid = remote.publish(&db, Some(&cache)).unwrap().oid().to_owned();
     assert_eq!(remote.head().unwrap(), Some(oid));
     assert_eq!(std::fs::read(cache).unwrap(), b"preserve");
 }
@@ -534,7 +558,6 @@ fn landed_push_keeps_success_oid_when_local_cache_cannot_be_written() {
 #[cfg(unix)]
 #[test]
 fn forced_lease_collision_retries_once_and_keeps_all_run_identities() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("remote.git");
     repository(&repo);
@@ -554,33 +577,9 @@ fn forced_lease_collision_retries_once_and_keeps_all_run_identities() {
         .unwrap()
         .publish(&b, None)
         .unwrap();
-    let wrapper = dir.path().join("bin");
-    std::fs::create_dir(&wrapper).unwrap();
-    std::fs::write(wrapper.join("git"),"#!/bin/sh\nfor arg in \"$@\"; do\n if [ \"$arg\" = push ]; then\n  echo push >> \"$PUSH_LOG\"\n  if mkdir \"$ONCE\" 2>/dev/null; then\n   \"$REAL_GIT\" --git-dir=\"$COMPETING_REPO\" push --force \"$TARGET_REPO\" \"$COMPETING_OID:refs/greenshift/history\" >/dev/null 2>&1 || exit 98\n  fi\n fi\ndone\nexec \"$REAL_GIT\" \"$@\"\n").unwrap();
-    std::fs::set_permissions(wrapper.join("git"), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let real = Command::new("sh")
-        .args(["-c", "command -v git"])
-        .output()
-        .unwrap();
-    let log = dir.path().join("push.log");
-    let output = assert_cmd::Command::cargo_bin("greenshift")
-        .unwrap()
-        .env(
-            "PATH",
-            format!("{}:{}", wrapper.display(), std::env::var("PATH").unwrap()),
-        )
-        .env("REAL_GIT", String::from_utf8(real.stdout).unwrap().trim())
-        .env("PUSH_LOG", &log)
-        .env("ONCE", dir.path().join("once"))
-        .env("COMPETING_REPO", &other_repo)
-        .env("TARGET_REPO", &repo)
-        .env("COMPETING_OID", competing)
-        .env_remove("GITHUB_EVENT_NAME")
-        .env_remove("GITHUB_ACTIONS")
-        .args(["history", "publish", "--remote"])
-        .arg(&repo)
-        .arg("--db")
-        .arg(&a)
+    let (mut command, log) =
+        history_cas::command(dir.path(), &repo, &other_repo, competing.oid(), &a);
+    let output = command
         .assert()
         .success()
         .stderr("")

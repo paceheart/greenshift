@@ -74,12 +74,15 @@ impl History {
 
     fn ingest(&mut self, tests: &[(&str, &str, bool)]) {
         self.runs += 1;
+        // Distinct observations at distinct commits may have identical results.
+        let commit = format!("{:07x}", self.runs);
         let file = self.dir.path().join(format!("run{}.xml", self.runs));
         std::fs::write(&file, junit(tests)).unwrap();
         greenshift()
             .arg("ingest")
             .arg("--db")
             .arg(&self.db)
+            .args(["--commit", &commit])
             .arg(&file)
             .assert()
             .success();

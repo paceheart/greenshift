@@ -16,7 +16,9 @@ use secrecy::ExposeSecret;
 use secrecy::SecretString;
 use tempfile::TempDir;
 
+mod outcome;
 pub mod snapshot;
+pub use outcome::{GroupOverlap, MergeReport, PublishOutcome, RestoreOutcome};
 
 /// The portable history protocol's sole reference.
 pub const HISTORY_REF: &str = "refs/greenshift/history";
@@ -411,10 +413,12 @@ impl Remote {
 
     /// Restore canonical history, optionally using the exact immutable cache
     /// copy. A missing ref does not treat an arbitrary cached DB as canonical.
-    pub fn restore(&self, db: &Path, cache: Option<&Path>) -> Result<bool, HistoryError> {
+    /// A committed restore includes a report: excluded incoming groups and
+    /// retained local grouping limitations are not full recovery.
+    pub fn restore(&self, db: &Path, cache: Option<&Path>) -> Result<RestoreOutcome, HistoryError> {
         check_restore_destination(db)?;
         let Some(oid) = self.head()? else {
-            return Ok(false);
+            return Ok(RestoreOutcome::Missing);
         };
         let parent = db
             .parent()
@@ -435,8 +439,8 @@ impl Remote {
             self.read(&oid, stage.path())?;
         }
         self.check_cancelled()?;
-        self.persist_restore(stage, db)?;
-        Ok(true)
+        let report = self.persist_restore(stage, db)?;
+        Ok(RestoreOutcome::Restored(report))
     }
 
     // Existing databases are updated through their SQLite inode. A missing
@@ -445,7 +449,7 @@ impl Remote {
         &self,
         stage: tempfile::NamedTempFile,
         db: &Path,
-    ) -> Result<(), HistoryError> {
+    ) -> Result<MergeReport, HistoryError> {
         self.persist_restore_using(stage, db, create_restore, |path| fs::symlink_metadata(path))
     }
 
@@ -455,7 +459,7 @@ impl Remote {
         db: &Path,
         mut create: impl FnMut(tempfile::NamedTempFile, &Path) -> Result<File, tempfile::PersistError>,
         mut inspect: impl FnMut(&Path) -> std::io::Result<fs::Metadata>,
-    ) -> Result<(), HistoryError> {
+    ) -> Result<MergeReport, HistoryError> {
         loop {
             check_restore_destination(db)?;
             self.check_cancelled()?;
@@ -471,7 +475,7 @@ impl Remote {
             }
             self.check_cancelled()?;
             match create(stage, db) {
-                Ok(_) => return Ok(()),
+                Ok(_) => return Ok(MergeReport::default()),
                 Err(err) if err.error.kind() == std::io::ErrorKind::AlreadyExists => {
                     stage = err.file
                 }
@@ -483,19 +487,26 @@ impl Remote {
     /// Publish validated data, comparing the expected old identity. One rejected
     /// update refetches and merges; a second rejection is returned as a warning
     /// by the CLI. Neither concurrent saves nor caching serialize this operation.
-    pub fn publish(&self, artifact: &Path, cache: Option<&Path>) -> Result<String, HistoryError> {
+    /// The outcome identifies whole incoming groups excluded by report overlap;
+    /// committing the candidate does not promise those source groups are durable.
+    pub fn publish(
+        &self,
+        artifact: &Path,
+        cache: Option<&Path>,
+    ) -> Result<PublishOutcome, HistoryError> {
         snapshot::validate(artifact).map_err(error)?;
         let current = self.scratch.path().join("current.sqlite");
         let candidate = self.scratch.path().join("candidate.sqlite");
         let mut old = self.head()?;
         let mut retried = false;
         loop {
-            if let Some(oid) = &old {
+            let report = if let Some(oid) = &old {
                 self.read(oid, &current)?;
-                snapshot::merge(&current, artifact, &candidate).map_err(error)?;
+                snapshot::merge(&current, artifact, &candidate).map_err(error)?
             } else {
                 snapshot::snapshot(artifact, &candidate).map_err(error)?;
-            }
+                MergeReport::default()
+            };
             let compressed = compress(&candidate)?;
             let blob = self.git(["hash-object", "-w", "--stdin"], Some(&compressed))?;
             let blob = std::str::from_utf8(&blob).map_err(error)?.trim();
@@ -531,7 +542,7 @@ impl Remote {
                             );
                         }
                     }
-                    return Ok(oid);
+                    return Ok(PublishOutcome::new(oid, report));
                 }
                 Err(
                     err @ HistoryError::Git {
@@ -827,9 +838,17 @@ mod tests {
         let remote = remote_repository(&dir.path().join("remote.git"));
         let other = remote_repository(&dir.path().join("other.git"));
         let cache = dir.path().join("cache");
-        let oid = remote.publish(&canonical, Some(&cache)).unwrap();
+        let oid = remote
+            .publish(&canonical, Some(&cache))
+            .unwrap()
+            .oid()
+            .to_owned();
         let other_cache = dir.path().join("other-cache");
-        let other_oid = other.publish(&substitute, Some(&other_cache)).unwrap();
+        let other_oid = other
+            .publish(&substitute, Some(&other_cache))
+            .unwrap()
+            .oid()
+            .to_owned();
         for name in ["commit", BLOB] {
             fs::copy(
                 other_cache.join(&other_oid).join(name),
@@ -962,7 +981,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let database = dir.path().join("legacy");
         fixture(&database, "legacy");
-        rusqlite::Connection::open(&database).unwrap().execute_batch("DROP INDEX runs_by_history_id; ALTER TABLE runs DROP COLUMN history_id; PRAGMA user_version=3;").unwrap();
+        rusqlite::Connection::open(&database).unwrap().execute_batch("DROP TABLE report_memberships; DROP INDEX runs_by_history_id; ALTER TABLE runs DROP COLUMN history_id; PRAGMA user_version=3;").unwrap();
         let remote = remote_repository(&dir.path().join("remote.git"));
         let blob = remote
             .git(
@@ -1007,6 +1026,53 @@ mod tests {
         );
         assert_eq!(
             conn.query_row("SELECT count(*) FROM runs", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_publish_keyed_import_transport_restore_retains_replay_identity() {
+        use crate::report_key::{ReportKey, ReportKeySet};
+        use crate::store::{ImportAcknowledgement, NewRun, Store};
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("source");
+        let xml = r#"<testsuite name="gears"><testcase name="turns"/></testsuite>"#;
+        let report = crate::junit::parse_str(xml).unwrap();
+        let keys = ReportKeySet::new([ReportKey::from_bytes(None, xml.as_bytes())]).unwrap();
+        let run = NewRun {
+            commit: None,
+            source: "transport-fixture",
+            files: &[],
+            partial: false,
+            branch: None,
+            tag: None,
+        };
+        let mut store = Store::open(&database).unwrap();
+        store.record_import(&run, &keys, report.cases()).unwrap();
+        drop(store);
+        let remote = remote_repository(&dir.path().join("remote.git"));
+        remote.publish(&database, None).unwrap();
+        let restored = dir.path().join("restored");
+        remote.restore(&restored, None).unwrap();
+        let mut store = Store::open(&restored).unwrap();
+        assert!(matches!(
+            store.record_import(&run, &keys, report.cases()).unwrap(),
+            ImportAcknowledgement::AlreadyPresent { .. }
+        ));
+        drop(store);
+        remote.publish(&restored, None).unwrap();
+        let fresh = dir.path().join("fresh");
+        remote.restore(&fresh, None).unwrap();
+        let conn = rusqlite::Connection::open(&fresh).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM runs", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM report_memberships", [], |r| r
+                .get::<_, i64>(0))
                 .unwrap(),
             1
         );

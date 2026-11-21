@@ -39,13 +39,16 @@
 //! written before version 3 keep NULL in both: what they ran on is not
 //! known.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtension};
 
 use crate::junit::{Outcome, TestCase};
+use crate::report_key::ReportKeySet;
 use crate::tainted::Tainted;
+
+pub use crate::report_key::{CommitId, CommitIdError};
 
 mod history_builder;
 mod history_data;
@@ -113,6 +116,18 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE runs ADD COLUMN history_id TEXT;
     CREATE UNIQUE INDEX runs_by_history_id ON runs(history_id);
+    "#,
+    // 5: globally unique report fingerprints, grouped by the first import.
+    r#"
+    CREATE TABLE report_memberships (
+        run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        namespace TEXT NOT NULL CHECK (namespace = '' OR
+            (length(namespace) BETWEEN 7 AND 64 AND namespace NOT GLOB '*[^0-9a-f]*')),
+        fingerprint_version INTEGER NOT NULL CHECK (fingerprint_version = 1),
+        digest TEXT NOT NULL CHECK (length(digest) = 64 AND digest NOT GLOB '*[^0-9a-f]*'),
+        PRIMARY KEY (namespace, fingerprint_version, digest)
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX report_memberships_by_run ON report_memberships(run_id);
     "#,
 ];
 
@@ -259,63 +274,18 @@ pub enum StoreError {
     BadVersion { path: Tainted, found: i64 },
     #[error("history store {path} has an invalid durable run identity")]
     InvalidHistoryId { path: Tainted },
+    #[error("history store {path}: report key namespace does not match the import commit")]
+    ReportKeyNamespaceMismatch { path: Tainted },
+    #[error("history store {path}: existing report membership has a different owner commit")]
+    InvalidReportMembership { path: Tainted },
+    #[error("history store {path}: report import partially overlaps existing reports; no history was recorded")]
+    PartialReportOverlap { path: Tainted },
+    #[error("history store {path}: repeated report group has different aggregate test results; no history was recorded")]
+    ReportPayloadMismatch { path: Tainted },
     #[error(
         "\"{path}\" is SQLite's special name for a private in-memory database, not a file; pass a real path"
     )]
     MemoryPath { path: Tainted },
-}
-
-/// A commit id as `ingest --commit` takes it: 7 to 64 hex digits, a full
-/// SHA-1 (40) or SHA-256 (64) object name or an abbreviation of one at
-/// least as long as git's default. Upper-case digits are accepted and kept
-/// in lower case, as git writes them, so one commit is stored one way.
-///
-/// Only new input is checked: `runs.commit_sha` has no constraint, and
-/// rows written before this check may hold anything. Nothing reads them
-/// back as a `CommitId`, so they are never rejected.
-///
-/// ```
-/// let id: greenshift::store::CommitId = "0123ABCD".parse().unwrap();
-/// assert_eq!(id.as_str(), "0123abcd");
-/// assert!("HEAD".parse::<greenshift::store::CommitId>().is_err());
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct CommitId(String);
-
-/// Why text is not a [`CommitId`].
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("a commit is {min} to {max} hex digits", min = CommitId::MIN_LEN, max = CommitId::MAX_LEN)]
-pub struct CommitIdError;
-
-impl CommitId {
-    /// The fewest digits taken: git's default abbreviation.
-    pub const MIN_LEN: usize = 7;
-    /// The most digits taken: a full SHA-256 object name.
-    pub const MAX_LEN: usize = 64;
-
-    /// The id in lower case, as stored.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::str::FromStr for CommitId {
-    type Err = CommitIdError;
-
-    fn from_str(text: &str) -> Result<CommitId, CommitIdError> {
-        let len_ok = (CommitId::MIN_LEN..=CommitId::MAX_LEN).contains(&text.len());
-        if len_ok && text.bytes().all(|b| b.is_ascii_hexdigit()) {
-            Ok(CommitId(text.to_ascii_lowercase()))
-        } else {
-            Err(CommitIdError)
-        }
-    }
-}
-
-impl std::fmt::Display for CommitId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
 }
 
 /// A run about to be recorded.
@@ -342,6 +312,27 @@ pub struct Recorded {
     pub run_id: i64,
     /// Rows written to `results`: distinct tests in the run.
     pub results: usize,
+}
+
+/// What an all-seen replay establishes about the submitted aggregate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayGrouping {
+    /// Same complete retained group, with semantically equal test results.
+    ExactGroup,
+    /// All reports exist, but their individual contributions cannot be verified
+    /// from aggregate-only storage. Existing grouping is retained.
+    MembershipOnly,
+}
+
+/// An import records a new aggregate or acknowledges existing memberships.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportAcknowledgement {
+    Recorded(Recorded),
+    AlreadyPresent {
+        grouping: ReplayGrouping,
+        /// Submitted source/partial/ref differs; first-observed metadata remains.
+        metadata_retained: bool,
+    },
 }
 
 /// An open, migrated history store.
@@ -555,67 +546,108 @@ impl Store {
         let path = &self.path;
         let sqlite = sqlite_err(path);
         let tx = self.conn.transaction().map_err(&sqlite)?;
-        tx.execute(
-            "INSERT INTO runs (commit_sha, source, partial, branch, tag, history_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, lower(hex(randomblob(16))))",
-            params![
-                run.commit.map(CommitId::as_str),
-                run.source,
-                run.partial,
-                run.branch,
-                run.tag
-            ],
-        )
-        .map_err(&sqlite)?;
-        let run_id = tx.last_insert_rowid();
-        {
-            let mut add_file = tx
-                .prepare("INSERT INTO run_files (run_id, position, path) VALUES (?1, ?2, ?3)")
-                .map_err(&sqlite)?;
-            for (position, file) in run.files.iter().enumerate() {
-                add_file
-                    .execute(params![run_id, position as i64, path_bytes(file)])
-                    .map_err(&sqlite)?;
-            }
+        let recorded = insert_run(&tx, run, &merged).map_err(&sqlite)?;
+        tx.commit().map_err(&sqlite)?;
+        Ok(recorded)
+    }
+
+    /// Atomically classify report memberships and record a fresh aggregate.
+    /// Partial overlap and exact-group result disagreement roll back without
+    /// changing any history. All-seen subsets/spanning groups acknowledge only
+    /// membership, never per-report result equivalence or coverage upgrades.
+    pub fn record_import<'c>(
+        &mut self,
+        run: &NewRun<'_>,
+        keys: &ReportKeySet,
+        cases: impl IntoIterator<Item = &'c TestCase>,
+    ) -> Result<ImportAcknowledgement, StoreError> {
+        if keys.namespace() != run.commit.map_or("", CommitId::as_str) {
+            return Err(StoreError::ReportKeyNamespaceMismatch {
+                path: self.path.clone(),
+            });
         }
+        let merged = merge_duplicates(cases);
+        let path = &self.path;
+        let sqlite = sqlite_err(path);
+        // This writer lock covers classification as well as insertion across
+        // independent connections; the unique key is the durable final guard.
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(&sqlite)?;
+        let mut owners: BTreeMap<i64, usize> = BTreeMap::new();
         {
-            let mut find_test = tx
-                .prepare("SELECT id FROM tests WHERE suite = ?1 AND name = ?2")
+            let mut find = tx.prepare("SELECT run_id FROM report_memberships WHERE namespace=?1 AND fingerprint_version=?2 AND digest=?3")
                 .map_err(&sqlite)?;
-            let mut add_test = tx
-                .prepare("INSERT INTO tests (suite, name) VALUES (?1, ?2)")
-                .map_err(&sqlite)?;
-            let mut add_result = tx
-                .prepare(
-                    "INSERT INTO results (run_id, test_id, outcome, duration_ms)
-                     VALUES (?1, ?2, ?3, ?4)",
-                )
-                .map_err(&sqlite)?;
-            for c in &merged {
-                let existing: Option<i64> = find_test
-                    .query_row(params![c.suite().as_raw(), c.name().as_raw()], |r| r.get(0))
+            for key in keys.keys() {
+                let owner: Option<i64> = find
+                    .query_row(
+                        params![key.namespace(), key.version(), key.digest()],
+                        |row| row.get(0),
+                    )
                     .optional()
                     .map_err(&sqlite)?;
-                let test_id = match existing {
-                    Some(id) => id,
-                    None => add_test
-                        .insert(params![c.suite().as_raw(), c.name().as_raw()])
-                        .map_err(&sqlite)?,
-                };
-                add_result
-                    .execute(params![
-                        run_id,
-                        test_id,
-                        c.outcome().as_str(),
-                        c.duration_ms()
-                    ])
-                    .map_err(&sqlite)?;
+                if let Some(owner) = owner {
+                    *owners.entry(owner).or_default() += 1;
+                }
             }
         }
+        let seen: usize = owners.values().sum();
+        if seen != 0 && seen != keys.keys().len() {
+            return Err(StoreError::PartialReportOverlap { path: path.clone() });
+        }
+        if seen == 0 {
+            let recorded = insert_run(&tx, run, &merged).map_err(&sqlite)?;
+            {
+                let mut add = tx.prepare("INSERT INTO report_memberships (run_id,namespace,fingerprint_version,digest) VALUES (?1,?2,?3,?4)")
+                    .map_err(&sqlite)?;
+                for key in keys.keys() {
+                    add.execute(params![
+                        recorded.run_id,
+                        key.namespace(),
+                        key.version(),
+                        key.digest()
+                    ])
+                    .map_err(&sqlite)?;
+                }
+            }
+            tx.commit().map_err(&sqlite)?;
+            return Ok(ImportAcknowledgement::Recorded(recorded));
+        }
+        let mut grouping = ReplayGrouping::MembershipOnly;
+        let mut metadata_retained = false;
+        for (&owner, &selected) in &owners {
+            let owner_commit: Option<String> = tx
+                .query_row("SELECT commit_sha FROM runs WHERE id=?1", [owner], |row| {
+                    row.get(0)
+                })
+                .map_err(&sqlite)?;
+            if owner_commit.as_deref() != run.commit.map(CommitId::as_str) {
+                return Err(StoreError::InvalidReportMembership { path: path.clone() });
+            }
+            let total: i64 = tx
+                .query_row(
+                    "SELECT count(*) FROM report_memberships WHERE run_id=?1",
+                    [owner],
+                    |row| row.get(0),
+                )
+                .map_err(&sqlite)?;
+            if owners.len() == 1 && usize::try_from(total).ok() == Some(selected) {
+                if !same_aggregate(&tx, owner, &merged).map_err(&sqlite)? {
+                    return Err(StoreError::ReportPayloadMismatch { path: path.clone() });
+                }
+                grouping = ReplayGrouping::ExactGroup;
+            }
+            let metadata_equal: bool = tx.query_row(
+                "SELECT source=?1 AND partial=?2 AND branch IS ?3 AND tag IS ?4 FROM runs WHERE id=?5",
+                params![run.source, run.partial, run.branch, run.tag, owner], |row| row.get(0),
+            ).map_err(&sqlite)?;
+            metadata_retained |= !metadata_equal;
+        }
         tx.commit().map_err(&sqlite)?;
-        Ok(Recorded {
-            run_id,
-            results: merged.len(),
+        Ok(ImportAcknowledgement::AlreadyPresent {
+            grouping,
+            metadata_retained,
         })
     }
 
@@ -703,6 +735,96 @@ impl Store {
             tests,
         ))
     }
+}
+
+/// Insert only within the caller's transaction, preserving random execution
+/// identities and the same aggregate semantics for both recording paths.
+fn insert_run(
+    tx: &rusqlite::Transaction<'_>,
+    run: &NewRun<'_>,
+    merged: &[TestCase],
+) -> rusqlite::Result<Recorded> {
+    tx.execute(
+        "INSERT INTO runs (commit_sha, source, partial, branch, tag, history_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, lower(hex(randomblob(16))))",
+        params![
+            run.commit.map(CommitId::as_str),
+            run.source,
+            run.partial,
+            run.branch,
+            run.tag
+        ],
+    )?;
+    let run_id = tx.last_insert_rowid();
+    {
+        let mut add_file =
+            tx.prepare("INSERT INTO run_files (run_id, position, path) VALUES (?1, ?2, ?3)")?;
+        for (position, file) in run.files.iter().enumerate() {
+            add_file.execute(params![run_id, position as i64, path_bytes(file)])?;
+        }
+    }
+    {
+        let mut find_test = tx.prepare("SELECT id FROM tests WHERE suite = ?1 AND name = ?2")?;
+        let mut add_test = tx.prepare("INSERT INTO tests (suite, name) VALUES (?1, ?2)")?;
+        let mut add_result = tx.prepare(
+            "INSERT INTO results (run_id, test_id, outcome, duration_ms) VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for c in merged {
+            let existing: Option<i64> = find_test
+                .query_row(params![c.suite().as_raw(), c.name().as_raw()], |row| {
+                    row.get(0)
+                })
+                .optional()?;
+            let test_id = match existing {
+                Some(id) => id,
+                None => add_test.insert(params![c.suite().as_raw(), c.name().as_raw()])?,
+            };
+            add_result.execute(params![
+                run_id,
+                test_id,
+                c.outcome().as_str(),
+                c.duration_ms()
+            ])?;
+        }
+    }
+    Ok(Recorded {
+        run_id,
+        results: merged.len(),
+    })
+}
+
+fn same_aggregate(
+    tx: &rusqlite::Transaction<'_>,
+    run_id: i64,
+    merged: &[TestCase],
+) -> rusqlite::Result<bool> {
+    let mut expected: Vec<_> = merged
+        .iter()
+        .map(|c| {
+            (
+                c.suite().as_raw(),
+                c.name().as_raw(),
+                c.outcome().as_str(),
+                c.duration_ms(),
+            )
+        })
+        .collect();
+    expected.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    let mut statement = tx.prepare("SELECT t.suite,t.name,r.outcome,r.duration_ms FROM results r JOIN tests t ON t.id=r.test_id WHERE r.run_id=?1 ORDER BY t.suite,t.name")?;
+    let mut rows = statement.query([run_id])?;
+    for (suite, name, outcome, duration) in expected {
+        let Some(row) = rows.next()? else {
+            return Ok(false);
+        };
+        if row.get::<_, String>(0)? != suite
+            || row.get::<_, String>(1)? != name
+            || row.get::<_, String>(2)? != outcome
+            || row.get::<_, Option<i64>>(3)? != duration
+        {
+            return Ok(false);
+        }
+    }
+    Ok(rows.next()?.is_none())
 }
 
 /// SQLite's in-memory names would open a database that vanishes on close.
@@ -840,3 +962,375 @@ fn merge_duplicates<'c>(cases: impl IntoIterator<Item = &'c TestCase>) -> Vec<Te
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+    use crate::report_key::ReportKey;
+
+    const RUN: NewRun<'static> = NewRun {
+        commit: None,
+        source: "producer",
+        files: &[],
+        partial: false,
+        branch: None,
+        tag: None,
+    };
+
+    fn keys(bytes: &[&[u8]]) -> ReportKeySet {
+        ReportKeySet::new(bytes.iter().map(|bytes| ReportKey::from_bytes(None, bytes))).unwrap()
+    }
+
+    fn case(name: &str, outcome: Outcome, duration: Option<i64>) -> TestCase {
+        TestCase::new(Tainted::raw("suite"), Tainted::raw(name), outcome, duration)
+    }
+
+    fn counts(store: &Store) -> Vec<i64> {
+        [
+            "runs",
+            "run_files",
+            "tests",
+            "results",
+            "report_memberships",
+        ]
+        .into_iter()
+        .map(|table| {
+            store
+                .conn
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        })
+        .collect()
+    }
+
+    #[test]
+    fn test_record_import_exact_retry_preserves_first_provenance_and_semantic_aggregate() {
+        let mut store = Store::open_in_memory().unwrap();
+        let files = [PathBuf::from("first.xml")];
+        let run = NewRun {
+            partial: true,
+            branch: Some("topic"),
+            files: &files,
+            ..RUN
+        };
+        let original = [
+            case("alpha", Outcome::Passed, Some(3)),
+            case("alpha", Outcome::Failed, Some(4)),
+            case("beta", Outcome::Skipped, None),
+        ];
+        let group = keys(&[b"a", b"b"]);
+        let ImportAcknowledgement::Recorded(recorded) =
+            store.record_import(&run, &group, &original).unwrap()
+        else {
+            panic!("fresh import must record")
+        };
+        let identity: (String, String) = store
+            .conn
+            .query_row("SELECT history_id,ingested_at FROM runs", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        let before = counts(&store);
+        let changed_files = [PathBuf::from("renamed.xml")];
+        let replay = NewRun {
+            source: "other",
+            partial: false,
+            tag: Some("v1"),
+            files: &changed_files,
+            ..RUN
+        };
+        let equivalent = [
+            case("beta", Outcome::Skipped, None),
+            case("alpha", Outcome::Failed, Some(7)),
+        ];
+        assert_eq!(
+            store.record_import(&replay, &group, &equivalent).unwrap(),
+            ImportAcknowledgement::AlreadyPresent {
+                grouping: ReplayGrouping::ExactGroup,
+                metadata_retained: true
+            }
+        );
+        assert_eq!(counts(&store), before);
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT history_id,ingested_at FROM runs", [], |row| Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?
+                )))
+                .unwrap(),
+            identity
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT source,partial,branch,tag FROM runs", [], |row| Ok(
+                    (
+                        row.get::<_, String>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?
+                    )
+                ))
+                .unwrap(),
+            ("producer".into(), true, Some("topic".into()), None)
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT path FROM run_files WHERE run_id=?1",
+                    [recorded.run_id],
+                    |row| row.get::<_, Vec<u8>>(0)
+                )
+                .unwrap(),
+            b"first.xml"
+        );
+        assert_eq!(
+            store.record_import(&run, &group, &original).unwrap(),
+            ImportAcknowledgement::AlreadyPresent {
+                grouping: ReplayGrouping::ExactGroup,
+                metadata_retained: false
+            }
+        );
+    }
+
+    #[test]
+    fn test_record_import_exact_group_checks_each_semantic_component_without_mutation() {
+        let mut store = Store::open_in_memory().unwrap();
+        let group = keys(&[b"a"]);
+        let original = [case("alpha", Outcome::Passed, Some(3))];
+        store.record_import(&RUN, &group, &original).unwrap();
+        let before = counts(&store);
+        let changes = [
+            vec![case("alpha", Outcome::Failed, Some(3))],
+            vec![case("alpha", Outcome::Passed, Some(4))],
+            vec![case("renamed", Outcome::Passed, Some(3))],
+            vec![TestCase::new(
+                Tainted::raw("other"),
+                Tainted::raw("alpha"),
+                Outcome::Passed,
+                Some(3),
+            )],
+            vec![case("alpha", Outcome::Passed, None)],
+            vec![],
+            vec![
+                case("alpha", Outcome::Passed, Some(3)),
+                case("extra", Outcome::Passed, None),
+            ],
+        ];
+        for changed in changes {
+            assert!(matches!(
+                store.record_import(&RUN, &group, &changed),
+                Err(StoreError::ReportPayloadMismatch { .. })
+            ));
+            assert_eq!(counts(&store), before);
+        }
+    }
+
+    #[test]
+    fn test_record_import_partial_overlap_is_atomic_and_subsets_spanning_are_membership_only() {
+        let mut store = Store::open_in_memory().unwrap();
+        let a = keys(&[b"a"]);
+        let ab = keys(&[b"a", b"b"]);
+        store.record_import(&RUN, &a, &[]).unwrap();
+        let before = counts(&store);
+        assert!(matches!(
+            store.record_import(&RUN, &ab, &[case("new", Outcome::Failed, None)]),
+            Err(StoreError::PartialReportOverlap { .. })
+        ));
+        assert_eq!(counts(&store), before);
+        store.record_import(&RUN, &keys(&[b"b"]), &[]).unwrap();
+        assert_eq!(
+            store
+                .record_import(&RUN, &ab, &[case("unverifiable", Outcome::Failed, None)])
+                .unwrap(),
+            ImportAcknowledgement::AlreadyPresent {
+                grouping: ReplayGrouping::MembershipOnly,
+                metadata_retained: false
+            }
+        );
+        assert_eq!(counts(&store), vec![2, 0, 0, 0, 2]);
+
+        let mut fresh = Store::open_in_memory().unwrap();
+        fresh.record_import(&RUN, &ab, &[]).unwrap();
+        assert_eq!(
+            fresh
+                .record_import(&RUN, &a, &[case("unverifiable", Outcome::Failed, None)])
+                .unwrap(),
+            ImportAcknowledgement::AlreadyPresent {
+                grouping: ReplayGrouping::MembershipOnly,
+                metadata_retained: false
+            }
+        );
+        assert_eq!(counts(&fresh), vec![1, 0, 0, 0, 2]);
+    }
+
+    #[test]
+    fn test_record_import_namespace_and_failed_insert_leave_all_tables_unchanged() {
+        let mut store = Store::open_in_memory().unwrap();
+        let commit: CommitId = "0123ABC".parse().unwrap();
+        let run = NewRun {
+            commit: Some(&commit),
+            ..RUN
+        };
+        assert!(matches!(
+            store.record_import(&run, &keys(&[b"a"]), &[]),
+            Err(StoreError::ReportKeyNamespaceMismatch { .. })
+        ));
+        assert_eq!(counts(&store), vec![0; 5]);
+        let group = ReportKeySet::new([ReportKey::from_bytes(Some(&commit), b"a")]).unwrap();
+        assert!(matches!(
+            store.record_import(&run, &group, &[case("invalid", Outcome::Passed, Some(-1))]),
+            Err(StoreError::Sqlite { .. })
+        ));
+        assert_eq!(counts(&store), vec![0; 5]);
+        store.record_import(&run, &group, &[]).unwrap();
+        store.record_import(&RUN, &keys(&[b"a"]), &[]).unwrap();
+        assert_eq!(counts(&store), vec![2, 0, 0, 0, 2]);
+    }
+
+    #[test]
+    fn test_record_run_remains_unkeyed_with_distinct_random_identities() {
+        let mut store = Store::open_in_memory().unwrap();
+        let cases = [case("same", Outcome::Passed, Some(1))];
+        store.record_run(&RUN, &cases).unwrap();
+        store.record_run(&RUN, &cases).unwrap();
+        assert_eq!(counts(&store), vec![2, 0, 1, 2, 0]);
+        let identities: i64 = store
+            .conn
+            .query_row("SELECT count(DISTINCT history_id) FROM runs", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(identities, 2);
+        store
+            .record_import(&RUN, &keys(&[b"same"]), &cases)
+            .unwrap();
+        assert_eq!(counts(&store), vec![3, 0, 1, 3, 1]);
+    }
+
+    #[test]
+    fn test_record_import_rejects_existing_membership_with_mismatched_owner_commit() {
+        for stored_commit in [Some("0123456"), Some(""), Some("legacy arbitrary text")] {
+            let mut store = Store::open_in_memory().unwrap();
+            let group = keys(&[b"a"]);
+            store.record_import(&RUN, &group, &[]).unwrap();
+            store
+                .conn
+                .execute("UPDATE runs SET commit_sha=?1", [stored_commit])
+                .unwrap();
+            let before = counts(&store);
+            assert!(matches!(
+                store.record_import(&RUN, &group, &[]),
+                Err(StoreError::InvalidReportMembership { .. })
+            ));
+            assert_eq!(counts(&store), before);
+        }
+        // Arbitrary commits on genuinely unkeyed legacy/execution data stay valid.
+        let mut store = Store::open_in_memory().unwrap();
+        store.record_run(&RUN, &[]).unwrap();
+        store
+            .conn
+            .execute("UPDATE runs SET commit_sha='legacy arbitrary text'", [])
+            .unwrap();
+        store.record_import(&RUN, &keys(&[b"a"]), &[]).unwrap();
+        assert_eq!(counts(&store), vec![2, 0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn test_record_import_independent_connections_serialize_same_disjoint_and_partial_groups() {
+        use std::sync::{Arc, Barrier};
+        for (left, right, expected_runs, expected_keys, conflict) in [
+            (vec![b"a".as_slice()], vec![b"a".as_slice()], 1, 1, false),
+            (vec![b"a".as_slice()], vec![b"b".as_slice()], 2, 2, false),
+            (
+                vec![b"a".as_slice(), b"b".as_slice()],
+                vec![b"b".as_slice(), b"c".as_slice()],
+                1,
+                2,
+                true,
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("history.sqlite");
+            let first = Store::open(&path).unwrap();
+            let second = Store::open(&path).unwrap();
+            let barrier = Arc::new(Barrier::new(2));
+            let handles: Vec<_> = [(first, keys(&left)), (second, keys(&right))]
+                .into_iter()
+                .map(|(mut store, keys)| {
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        store.record_import(&RUN, &keys, &[])
+                    })
+                })
+                .collect();
+            let outcomes: Vec<_> = handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect();
+            assert_eq!(
+                outcomes
+                    .iter()
+                    .filter(|outcome| matches!(outcome, Ok(ImportAcknowledgement::Recorded(_))))
+                    .count(),
+                expected_runs
+            );
+            assert_eq!(
+                outcomes
+                    .iter()
+                    .filter(|outcome| matches!(
+                        outcome,
+                        Err(StoreError::PartialReportOverlap { .. })
+                    ))
+                    .count(),
+                usize::from(conflict)
+            );
+            assert!(outcomes.iter().all(|outcome| outcome.is_ok()
+                || matches!(outcome, Err(StoreError::PartialReportOverlap { .. }))));
+            let store = Store::open(&path).unwrap();
+            assert_eq!(
+                counts(&store),
+                vec![expected_runs as i64, 0, 0, 0, expected_keys]
+            );
+        }
+    }
+
+    #[test]
+    fn test_report_membership_sql_guards_uniqueness_foreign_keys_and_canonical_values() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.record_run(&RUN, &[]).unwrap();
+        store.record_run(&RUN, &[]).unwrap();
+        let digest = "a".repeat(64);
+        store
+            .conn
+            .execute(
+                "INSERT INTO report_memberships VALUES (1,'',1,?1)",
+                [&digest],
+            )
+            .unwrap();
+        for (owner, namespace, version, digest) in [
+            (1, "", 1, digest.clone()),
+            (2, "", 1, digest.clone()),
+            (999, "", 1, "b".repeat(64)),
+            (1, "ABCDEF0", 1, "b".repeat(64)),
+            (1, "", 2, "b".repeat(64)),
+            (1, "", 1, "A".repeat(64)),
+            (1, "", 1, "b".repeat(63)),
+        ] {
+            assert!(store
+                .conn
+                .execute(
+                    "INSERT INTO report_memberships VALUES (?1,?2,?3,?4)",
+                    params![owner, namespace, version, digest]
+                )
+                .is_err());
+        }
+        store.conn.execute("DELETE FROM runs", []).unwrap();
+        assert_eq!(counts(&store), vec![0; 5]);
+    }
+}
