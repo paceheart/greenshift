@@ -13,6 +13,7 @@ pub mod cli;
 pub mod history;
 pub mod init;
 pub mod junit;
+pub mod lein;
 pub mod nextest;
 pub mod plan;
 pub mod report_key;
