@@ -765,6 +765,66 @@ fn each_report_is_recorded_once_however_a_chained_method_passes_it_on() {
 }
 
 #[test]
+fn a_test_that_calls_another_keeps_its_own_assertions_after_the_call() {
+    let _turn = turn();
+    if !lein_ready() {
+        return;
+    }
+    let project = Project::new();
+    project.init();
+    // clojure.test composes tests by calling them: inner reports its own
+    // begin and end inside outer's, and outer's failure comes after.
+    std::fs::write(
+        project.root().join("test/scratch/nested_test.clj"),
+        "(ns scratch.nested-test (:require [clojure.test :refer :all]))\n\
+         (deftest inner (is true))\n\
+         (deftest outer (inner) (is (= 1 2) \"after inner\"))\n",
+    )
+    .unwrap();
+    let dir = project.dir.path();
+    let names = dir.join("group.names");
+    // Both named, as a whole run names them: a test lein sets aside runs
+    // nothing when called.
+    std::fs::write(
+        &names,
+        "scratch.nested-test/inner\nscratch.nested-test/outer\n",
+    )
+    .unwrap();
+    let junit = dir.join("group.xml");
+    let script = dir.join("group.clj");
+    std::fs::write(
+        &script,
+        greenshift::run::lein::run_script(&names, &junit).unwrap(),
+    )
+    .unwrap();
+    let injection = greenshift::run::lein::injection(&script).unwrap();
+    let out = project.lein(
+        &[
+            "update-in",
+            ":injections",
+            "conj",
+            injection.to_str().unwrap(),
+            "--",
+            "test",
+            ":greenshift",
+        ],
+        &[],
+    );
+    assert!(
+        text(&out.stdout).contains("FAIL in (outer)"),
+        "{}",
+        text(&out.stdout)
+    );
+    let xml = std::fs::read_to_string(&junit).unwrap();
+    let outer = xml
+        .split("<testcase ")
+        .find(|case| case.contains("name=\"outer\""))
+        .unwrap_or_else(|| panic!("{xml}"));
+    assert!(outer.contains("<failure message=\"after inner\""), "{xml}");
+    assert!(!xml.contains("name=\"fixtures\""), "{xml}");
+}
+
+#[test]
 fn a_report_var_a_project_injection_made_a_function_still_has_every_result_recorded() {
     let _turn = turn();
     if !lein_ready() {

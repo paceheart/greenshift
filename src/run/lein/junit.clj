@@ -44,10 +44,11 @@
   (:require [clojure.string :as str]
             [clojure.test :as t]))
 
-;; JUnit record: {:ns :name :nanos :pass :fail :error :problems :skipped}, in run order.
+;; JUnit record: {:ns :name :start :nanos :pass :fail :error :problems :skipped}, in run order.
 (def ^:private cases (atom []))
-(def ^:private current (atom nil))      ; index into @cases of the var now running, or nil
-(def ^:private started (atom nil))      ; System/nanoTime when the var now running began
+;; Indexes into @cases of the vars now running, innermost last: a deftest that
+;; calls another (clojure.test's way to compose tests) runs that one inside it.
+(def ^:private current (atom []))
 (def ^:private current-ns (atom nil))   ; name of the namespace now running, or nil
 (def ^:private fixture-errors (atom #{})) ; namespaces whose fixtures threw
 (def ^:private run-started (atom nil))  ; System/nanoTime when run-tests began, or nil
@@ -78,8 +79,9 @@
   "Count an assertion of kind k, with its problem if it failed, on the var
   now running, or else on the running namespace's fixtures testcase."
   [k problem]
-  (let [fixture (when-not @current @current-ns)]
-    (when-let [i (or @current (some-> fixture fixtures-index!))]
+  (let [running (peek @current)
+        fixture (when-not running @current-ns)]
+    (when-let [i (or running (some-> fixture fixtures-index!))]
       (when (and fixture (= k :error))
         (swap! fixture-errors conj fixture))
       (swap! cases #(-> %
@@ -144,17 +146,18 @@
          "/>\n")))
 
 (defn- finished-cases
-  "The cases recorded, a var that never ended as an error, then a skipped
-  case for every name in names that has none."
+  "The cases recorded, every var that never ended as an error, then a
+  skipped case for every name in names that has none."
   [names]
-  (let [cs (cond-> @cases
-             @current (update @current
-                              #(-> %
-                                   (assoc :nanos (- (System/nanoTime) (or @started (System/nanoTime))))
-                                   (update :error inc)
-                                   (update :problems conj
-                                           {:kind :error :message "did not finish: the JVM exited during it"
-                                            :type "exit" :body "The test began and never ended."}))))
+  (let [cs (reduce (fn [cs i]
+                     (update cs i
+                             #(-> %
+                                  (assoc :nanos (- (System/nanoTime) (:start %)))
+                                  (update :error inc)
+                                  (update :problems conj
+                                          {:kind :error :message "did not finish: the JVM exited during it"
+                                           :type "exit" :body "The test began and never ended."}))))
+                   @cases @current)
         ran (set (map (juxt :ns :name) cs))
         failed-ns @fixture-errors]
     (into cs
@@ -248,16 +251,15 @@
         hooks [[:begin-test-var
                 (fn [begin]
                   (fn [m]
-                    (reset! started (System/nanoTime))
-                    (swap! cases conj (case-of (:var m)))
-                    (reset! current (dec (count @cases)))
+                    (swap! cases conj (assoc (case-of (:var m)) :start (System/nanoTime)))
+                    (swap! current conj (dec (count @cases)))
                     (begin m)))]
                [:end-test-var
                 (fn [end]
                   (fn [m]
-                    (when-let [i @current]
-                      (swap! cases assoc-in [i :nanos] (- (System/nanoTime) (or @started (System/nanoTime))))
-                      (reset! current nil))
+                    (when-let [i (peek @current)]
+                      (swap! cases assoc-in [i :nanos] (- (System/nanoTime) (get-in @cases [i :start])))
+                      (swap! current pop))
                     (end m)))]
                [:end-test-ns
                 (fn [end-ns]
