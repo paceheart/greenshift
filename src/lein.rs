@@ -270,6 +270,12 @@ impl Reader<'_> {
                 self.at += 1;
                 self.prefixed(start, None).map(Some)
             }
+            b'^' => {
+                // #^meta form, the older spelling of ^meta form
+                self.at += 1;
+                let meta = self.required(start, "metadata")?;
+                self.prefixed(start, Some(meta)).map(Some)
+            }
             b'#' => {
                 // ##Inf, ##-Inf, ##NaN
                 self.at += 1;

@@ -72,6 +72,24 @@ fn the_reader_skips_strings_comments_characters_and_reader_macros() {
 }
 
 #[test]
+fn older_metadata_is_one_form_with_what_it_applies_to() {
+    // Read as two forms, #^{…} would shift every option after it out of
+    // its pair, and the merge would add a second :test-selectors, which
+    // lein takes over the first.
+    let text = "(defproject a \"1\"\n  :jvm-opts #^{:replace true} [\"-Xmx1g\"]\n  \
+                :test-selectors {:fast :fast})";
+    let forms = read_forms(text).unwrap();
+    assert_eq!(
+        forms[0].children()[4].text(text),
+        "#^{:replace true} [\"-Xmx1g\"]"
+    );
+    assert!(matches!(selectors(text).unwrap(), Selectors::Literal(_)));
+    let merged = changed(merge(text, false).unwrap());
+    assert_eq!(merged.matches(":test-selectors").count(), 1);
+    assert!(merged.contains(":test-selectors {:fast :fast\n"));
+}
+
+#[test]
 fn unbalanced_or_unterminated_text_is_an_error_naming_its_line() {
     for (text, line) in [
         ("(a\n(b)", 1),
