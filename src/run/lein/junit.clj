@@ -196,21 +196,24 @@
   [^String path]
   (into [] (comp (remove str/blank?) (distinct)) (str/split-lines (slurp path))))
 
-(def ^:private last-event (atom nil)) ; the report map greenshift last recorded
+;; The kind of report one of greenshift's methods is recording now, or nil.
+(def ^:private ^:dynamic *recording* nil)
 
 (defn- hook!
   "Make report method k of the multimethod mf (wrap previous), previous
-  being the method k has now, and note it in ours as k's. A report map
-  that reaches greenshift's method again, through a method that chains
-  to the one it replaced, is passed on without being recorded twice."
+  being the method k has now, and note it in ours as k's. Reached while
+  greenshift's newer method for k records (through a method that chains
+  to the one it replaced, with that map or one of its own), a method
+  that is no longer k's passes the report on unrecorded: it is recorded
+  once already."
   [^clojure.lang.MultiFn mf ours k wrap]
   (let [previous (.getMethod mf k)
         record (wrap previous)
-        f (fn [m]
-            (if (identical? m @last-event)
+        f (fn self [m]
+            (if (and (= k *recording*) (not (identical? self (.getMethod mf k))))
               (previous m)
-              (do (reset! last-event m)
-                  (record m))))]
+              (binding [*recording* k]
+                (record m))))]
     (.addMethod mf k f)
     (swap! ours assoc k [wrap f])))
 

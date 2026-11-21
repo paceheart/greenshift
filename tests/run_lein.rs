@@ -680,3 +680,59 @@ fn a_report_method_a_test_namespace_defines_still_has_its_failures_recorded() {
         "{results:?}"
     );
 }
+
+#[test]
+fn each_report_is_recorded_once_however_a_chained_method_passes_it_on() {
+    let _turn = turn();
+    if !lein_ready() {
+        return;
+    }
+    let project = Project::new();
+    project.init();
+    // A :fail method that chains to greenshift's with a map of its own,
+    // and a test that reports one constant map twice: two failures and
+    // two errors, as clojure.test counts them.
+    std::fs::write(
+        project.root().join("test/scratch/chain_test.clj"),
+        "(ns scratch.chain-test (:require [clojure.test :as t :refer :all]))\n\
+         (let [old (get-method t/report :fail)]\n  \
+           (defmethod t/report :fail [m] (old (assoc m :seen-by ::chain))))\n\
+         (defn- boom [] (t/report {:type :error :message \"same map\"}))\n\
+         (deftest altered (is (= 1 2) \"one\") (is (= 3 4) \"two\"))\n\
+         (deftest same-map-twice (boom) (boom))\n",
+    )
+    .unwrap();
+    let dir = project.dir.path();
+    let names = dir.join("group.names");
+    std::fs::write(
+        &names,
+        "scratch.chain-test/altered\nscratch.chain-test/same-map-twice\n",
+    )
+    .unwrap();
+    let junit = dir.join("group.xml");
+    let script = dir.join("group.clj");
+    std::fs::write(
+        &script,
+        greenshift::run::lein::run_script(&names, &junit).unwrap(),
+    )
+    .unwrap();
+    let injection = greenshift::run::lein::injection(&script).unwrap();
+    let out = project.lein(
+        &[
+            "update-in",
+            ":injections",
+            "conj",
+            injection.to_str().unwrap(),
+            "--",
+            "test",
+            ":greenshift",
+        ],
+        &[],
+    );
+    let stdout = text(&out.stdout);
+    assert!(stdout.contains("2 failures, 2 errors."), "{stdout}");
+    let xml = std::fs::read_to_string(&junit).unwrap();
+    assert_eq!(xml.matches("<failure ").count(), 2, "{xml}");
+    assert_eq!(xml.matches("<error ").count(), 2, "{xml}");
+    assert_eq!(xml.matches("assertions=\"2\"").count(), 2, "{xml}");
+}
