@@ -4,20 +4,28 @@
 //!
 //! Needs a JDK and lein on PATH; without them every test here is skipped,
 //! unless `GREENSHIFT_REQUIRE_LEIN` is set (as greenshift's CI sets it),
-//! when a missing lein fails them. The tests take turns: each lein run is
-//! two JVMs (lein's own and the project's), and no more run at once. Each
-//! JVM's heap is capped at 1 GiB.
+//! when a missing lein fails them. The tests take turns, through a file
+//! lock, so also when nextest runs them as processes of their own: each
+//! lein run is two JVMs (lein's own and the project's), and no more run
+//! at once. Each JVM's heap is capped at 1 GiB.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process::Output;
-use std::sync::Mutex;
 use std::time::Instant;
 
 use rusqlite::Connection;
 
-/// One lein at a time.
-static LEIN: Mutex<()> = Mutex::new(());
+/// A turn to run lein: held until dropped. One test holds it at a time,
+/// in this process or another.
+struct Turn(#[allow(dead_code)] std::fs::File);
+
+fn turn() -> Turn {
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("run-lein.lock");
+    let file = std::fs::File::create(path).unwrap();
+    file.lock().unwrap();
+    Turn(file)
+}
 
 const JVM_OPTS: &str = "-Xmx1g";
 
@@ -283,7 +291,7 @@ fn expected_results(failed: &[&str]) -> Vec<(String, String, String)> {
 
 #[test]
 fn i1_i2_the_listing_is_leins_default_selection_with_the_profile_merged() {
-    let _turn = LEIN.lock().unwrap_or_else(|e| e.into_inner());
+    let _turn = turn();
     if !lein_ready() {
         return;
     }
@@ -364,7 +372,7 @@ fn i1_i2_the_listing_is_leins_default_selection_with_the_profile_merged() {
 
 #[test]
 fn i3_the_greenshift_selector_runs_exactly_the_named_tests_and_loads_only_their_namespaces() {
-    let _turn = LEIN.lock().unwrap_or_else(|e| e.into_inner());
+    let _turn = turn();
     if !lein_ready() {
         return;
     }
@@ -432,7 +440,7 @@ fn i3_the_greenshift_selector_runs_exactly_the_named_tests_and_loads_only_their_
 
 #[test]
 fn i4_plain_lein_test_is_unchanged_by_the_entry() {
-    let _turn = LEIN.lock().unwrap_or_else(|e| e.into_inner());
+    let _turn = turn();
     if !lein_ready() {
         return;
     }
@@ -469,7 +477,7 @@ fn i4_plain_lein_test_is_unchanged_by_the_entry() {
 
 #[test]
 fn i5_i6_a_run_records_every_outcome_and_the_second_plans_rich_and_poor() {
-    let _turn = LEIN.lock().unwrap_or_else(|e| e.into_inner());
+    let _turn = turn();
     if !lein_ready() {
         return;
     }
@@ -503,7 +511,7 @@ fn i5_i6_a_run_records_every_outcome_and_the_second_plans_rich_and_poor() {
 
 #[test]
 fn i7_neither_injection_nor_the_selector_warns_of_reflection() {
-    let _turn = LEIN.lock().unwrap_or_else(|e| e.into_inner());
+    let _turn = turn();
     if !lein_ready() {
         return;
     }
@@ -535,7 +543,7 @@ fn i7_neither_injection_nor_the_selector_warns_of_reflection() {
 
 #[test]
 fn without_the_selector_groups_run_with_only_and_record_the_same() {
-    let _turn = LEIN.lock().unwrap_or_else(|e| e.into_inner());
+    let _turn = turn();
     if !lein_ready() {
         return;
     }
@@ -556,7 +564,7 @@ fn without_the_selector_groups_run_with_only_and_record_the_same() {
 
 #[test]
 fn a_listing_that_fails_ends_the_run_with_its_status_and_records_nothing() {
-    let _turn = LEIN.lock().unwrap_or_else(|e| e.into_inner());
+    let _turn = turn();
     if !lein_ready() {
         return;
     }
@@ -575,7 +583,7 @@ fn a_listing_that_fails_ends_the_run_with_its_status_and_records_nothing() {
 
 #[test]
 fn a_jvm_that_exits_inside_a_test_still_writes_every_tests_result() {
-    let _turn = LEIN.lock().unwrap_or_else(|e| e.into_inner());
+    let _turn = turn();
     if !lein_ready() {
         return;
     }
