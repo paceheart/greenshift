@@ -510,6 +510,28 @@ fn i5_i6_a_run_records_every_outcome_and_the_second_plans_rich_and_poor() {
 }
 
 #[test]
+fn a_private_test_planned_apart_from_its_namespaces_public_ones_still_runs() {
+    let _turn = turn();
+    if !lein_ready() {
+        return;
+    }
+    let project = Project::new();
+    project.init();
+    // kept-private fails, so the second cycle plans it rich while the
+    // public tests of its namespace, which pass, go poor. lein selects a
+    // namespace only for a public test, so on its own the rich JVM would
+    // skip it: a failing test, never run.
+    let out = project.run(&["--min-runs", "1"], &["kept-private"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let out = project.run(&["--min-runs", "1"], &["kept-private"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let runs = project.runs();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[1].files, 2, "rich and poor each wrote JUnit");
+    assert_eq!(runs[1].results, expected_results(&["kept-private"]));
+}
+
+#[test]
 fn i7_neither_injection_nor_the_selector_warns_of_reflection() {
     let _turn = turn();
     if !lein_ready() {

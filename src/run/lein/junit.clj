@@ -18,6 +18,9 @@
 ;;   fixture's exception (which lein catches and reports as an error), go on
 ;;   a testcase named "fixtures" in that namespace, so the file's failures
 ;;   and errors agree with clojure.test's counts.
+;; - A namespace the names file names runs even when lein did not select
+;;   it (lein selects one only for a public test, so a group of its private
+;;   tests alone would never run), its unnamed tests set aside meanwhile.
 ;; - Every name in the names file that never ran is <skipped>: after a
 ;;   fixture error in its namespace, "not run: fixture error in <ns>", and
 ;;   otherwise "not run". A var that began but never ended (the JVM exited
@@ -225,6 +228,7 @@
   names them, the rest after, as given."
   [{:keys [^String names ^String junit]}]
   (let [names (read-names names)
+        wanted (set names)
         order (reduce (fn [m ^String n]
                         (let [i (.indexOf n "/")
                               k (if (pos? i) (subs n 0 i) n)]
@@ -270,8 +274,23 @@
      (fn [run-tests]
        (fn [& namespaces]
          (rehook! mf ours)
-         (let [nss (sort-by #(get order (ns-str %) Long/MAX_VALUE)
-                            (or (seq namespaces) [*ns*]))]
+         (let [given (set (map ns-str namespaces))
+               ;; lein selects a namespace only when a public var matches,
+               ;; so a group naming only private tests of a namespace (its
+               ;; public ones planned into the other group) would never
+               ;; run them. Such a namespace, loaded, runs as well, with
+               ;; every test the names file leaves out set aside, as lein
+               ;; sets aside the tests its selectors leave out.
+               extra (vec (keep #(when-not (given %) (find-ns (symbol %))) (keys order)))
+               aside (vec (for [ns extra
+                                v (vals (ns-interns ns))
+                                :when (and (:test (meta v))
+                                           (not (wanted (str (ns-name ns) "/" (:name (meta v))))))]
+                            v))
+               nss (sort-by #(get order (ns-str %) Long/MAX_VALUE)
+                            (or (seq (concat namespaces extra)) [*ns*]))]
+           (doseq [v aside]
+             (alter-meta! v #(-> % (assoc ::set-aside (:test %)) (dissoc :test))))
            (reset! run-started (System/nanoTime))
            (try
              (apply run-tests nss)
@@ -289,6 +308,8 @@
                                                  :body (stack-trace e)})))))
                (throw e))
              (finally
+               (doseq [v aside]
+                 (alter-meta! v #(-> % (assoc :test (::set-aside %)) (dissoc ::set-aside))))
                (write! junit names)))))))
     (.addShutdownHook (Runtime/getRuntime)
                       (Thread. ^Runnable (fn [] (write! junit names))))
