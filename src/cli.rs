@@ -132,6 +132,42 @@ pub struct InitArgs {
 pub enum InitBackend {
     /// Set up `greenshift run nextest`, with cargo-nextest.
     Nextest(InitNextestArgs),
+    /// Set up `greenshift run lein`, with Leiningen: add the :greenshift
+    /// test selector to project.clj, and with --ci, write a workflow.
+    Lein(InitLeinArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct InitLeinArgs {
+    /// Also write a GitHub workflow, .github/workflows/greenshift.yml,
+    /// that runs `greenshift run lein` with durable history. Only GitHub
+    /// is supported for now.
+    #[arg(long, value_enum, value_name = "FORGE", num_args = 0..=1,
+          default_missing_value = "github")]
+    pub ci: Option<crate::init::Forge>,
+
+    /// The greenshift release the workflow installs, such as v0.3.0; with
+    /// --ci, required. It needs `run lein`.
+    #[arg(long, value_name = "TAG", requires = "ci")]
+    pub release: Option<crate::init::Release>,
+
+    /// The release binary's SHA-256, from the release's .sha256 file,
+    /// checked independently; with --ci, required.
+    #[arg(long, value_name = "HEX", requires = "ci")]
+    pub sha256: Option<crate::init::Sha256>,
+
+    /// The runner label the jobs run on, an x86_64 Linux runner.
+    /// Default: ubuntu-latest.
+    #[arg(long, value_name = "LABEL", requires = "ci")]
+    pub runs_on: Option<crate::init::RunnerLabel>,
+
+    /// The JDK the workflow sets up (Temurin). Default: 25.
+    #[arg(long, value_name = "VERSION", requires = "ci")]
+    pub java_version: Option<crate::init::lein::JavaVersion>,
+
+    /// Replace a :greenshift selector or a workflow that exists and differs.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -521,6 +557,7 @@ pub fn run_with_control(control: &TransportControl) -> anyhow::Result<ExitCode> 
         Command::History(args) => history(&args, control),
         Command::Init(args) => match args.backend {
             InitBackend::Nextest(args) => init_nextest(&args, std::path::Path::new(".")),
+            InitBackend::Lein(args) => init_lein(&args, std::path::Path::new(".")),
         },
     }
 }
@@ -568,6 +605,47 @@ pub fn init_nextest(args: &InitNextestArgs, root: &std::path::Path) -> anyhow::R
     };
     let wants = init::nextest::wants(&settings);
     let actions = init::decide(root, wants, args.force)?;
+    init::apply(root, &actions)
+}
+
+/// Set the Leiningen project at `root` up for `greenshift run lein`; see
+/// [`crate::init::lein`].
+pub fn init_lein(args: &InitLeinArgs, root: &std::path::Path) -> anyhow::Result<ExitCode> {
+    use crate::init::{self, Forge};
+    let workflow = match (args.ci, &args.release, &args.sha256) {
+        (None, ..) => None,
+        (Some(Forge::Forgejo), ..) => {
+            eprintln!(
+                "greenshift: usage error: init lein writes a GitHub workflow only, for now; \
+                 use --ci github"
+            );
+            return Ok(ExitCode::from(2));
+        }
+        (Some(Forge::Github), Some(release), Some(sha256)) => Some((release, sha256)),
+        (Some(Forge::Github), ..) => {
+            eprintln!("greenshift: usage error: --ci needs --release and --sha256");
+            return Ok(ExitCode::from(2));
+        }
+    };
+    let mut actions = vec![init::lein::project_action(root, args.force)?];
+    if let Some((release, sha256)) = workflow {
+        let runs_on = args
+            .runs_on
+            .clone()
+            .unwrap_or_else(|| Forge::Github.default_runner());
+        let java = args.java_version.clone().unwrap_or_default();
+        let settings = init::lein::Settings {
+            release,
+            sha256,
+            runs_on: &runs_on,
+            java: &java,
+        };
+        actions.extend(init::decide(
+            root,
+            init::lein::wants(&settings),
+            args.force,
+        )?);
+    }
     init::apply(root, &actions)
 }
 

@@ -1,8 +1,9 @@
 //! `greenshift init`: set a repository up to run its tests with greenshift
 //! in CI, once, with output meant to be committed as is.
 //!
-//! A backend (only [`nextest`] so far) says which files it wants and with
-//! what content ([`Want`]); this module decides what to do with each
+//! A backend ([`nextest`] or [`lein`]) says which files it wants and with
+//! what content ([`Want`]), or for a file it edits, what to do with it
+//! ([`Action::Edit`]); this module decides what to do with each
 //! against what is already on disk ([`decide`]), and then writes them: a
 //! file that exists and differs is left alone unless `--force` is given,
 //! and while one is left alone, none is written. A path through a symlink
@@ -27,6 +28,7 @@ use clap::ValueEnum;
 
 use crate::tainted::Tainted;
 
+pub mod lein;
 pub mod nextest;
 
 /// The last published release without `run nextest` and durable history:
@@ -256,10 +258,18 @@ pub enum Action {
         content: String,
         replaces: bool,
     },
+    /// Replace the file that is there with `content`, an edit of it that
+    /// adds `what`.
+    Edit {
+        path: PathBuf,
+        content: String,
+        what: String,
+    },
     /// Nothing to do: the file is already as wanted.
     Unchanged { path: PathBuf },
-    /// The file exists and differs, and `--force` was not given.
-    Conflict { path: PathBuf },
+    /// The file exists and differs, and `--force` was not given; `why`
+    /// says so in place of the general message, when given.
+    Conflict { path: PathBuf, why: Option<String> },
 }
 
 /// What to do with each of `wants` under `root`, given `force`.
@@ -280,7 +290,7 @@ pub fn decide(root: &Path, wants: Vec<Want>, force: bool) -> anyhow::Result<Vec<
                     content,
                     replaces: true,
                 },
-                Some(_) => Action::Conflict { path },
+                Some(_) => Action::Conflict { path, why: None },
             })
         })
         .collect()
@@ -317,6 +327,8 @@ enum Ready<'a> {
     Write {
         path: &'a Path,
         replaces: bool,
+        /// What an edit adds, for [`Action::Edit`].
+        adds: Option<&'a str>,
         file: tempfile::NamedTempFile,
     },
     Unchanged {
@@ -328,20 +340,23 @@ enum Ready<'a> {
 /// stdout, and return the exit status: success, or 1 with nothing written
 /// when any is a [`Action::Conflict`], each named on stderr.
 pub fn apply(root: &Path, actions: &[Action]) -> anyhow::Result<ExitCode> {
-    let conflicts: Vec<&Path> = actions
+    let conflicts: Vec<(&Path, &Option<String>)> = actions
         .iter()
         .filter_map(|action| match action {
-            Action::Conflict { path } => Some(path.as_path()),
+            Action::Conflict { path, why } => Some((path.as_path(), why)),
             _ => None,
         })
         .collect();
     if !conflicts.is_empty() {
-        for path in &conflicts {
-            eprintln!(
-                "greenshift: {} exists and differs from what init writes; \
-                 left alone (--force overwrites it)",
-                Tainted::from(*path)
-            );
+        for (path, why) in &conflicts {
+            match why {
+                Some(why) => eprintln!("greenshift: {why}"),
+                None => eprintln!(
+                    "greenshift: {} exists and differs from what init writes; \
+                     left alone (--force overwrites it)",
+                    Tainted::from(*path)
+                ),
+            }
         }
         eprintln!("greenshift: nothing written");
         return Ok(ExitCode::from(1));
@@ -355,20 +370,22 @@ pub fn apply(root: &Path, actions: &[Action]) -> anyhow::Result<ExitCode> {
                 path,
                 content,
                 replaces,
-            } => Some(
-                stage(&root.join(path), content)
-                    .with_context(|| {
-                        format!(
-                            "could not write {}; nothing written",
-                            Tainted::from(path.as_path())
-                        )
-                    })
-                    .map(|file| Ready::Write {
-                        path,
-                        replaces: *replaces,
-                        file,
-                    }),
-            ),
+            } => Some(staged(root, path, content).map(|file| Ready::Write {
+                path,
+                replaces: *replaces,
+                adds: None,
+                file,
+            })),
+            Action::Edit {
+                path,
+                content,
+                what,
+            } => Some(staged(root, path, content).map(|file| Ready::Write {
+                path,
+                replaces: true,
+                adds: Some(what),
+                file,
+            })),
             Action::Unchanged { path } => Some(Ok(Ready::Unchanged { path })),
             Action::Conflict { .. } => None,
         })
@@ -379,13 +396,19 @@ pub fn apply(root: &Path, actions: &[Action]) -> anyhow::Result<ExitCode> {
             Ready::Write {
                 path,
                 replaces,
+                adds,
                 file,
             } => {
                 file.persist(root.join(path))
                     .map_err(|err| err.error)
                     .with_context(|| format!("could not write {}", Tainted::from(path)))?;
-                let verb = if replaces { "overwrote" } else { "wrote" };
-                println!("greenshift: {verb} {}", Tainted::from(path));
+                match adds {
+                    Some(what) => println!("greenshift: added {what} to {}", Tainted::from(path)),
+                    None => {
+                        let verb = if replaces { "overwrote" } else { "wrote" };
+                        println!("greenshift: {verb} {}", Tainted::from(path));
+                    }
+                }
                 changed = true;
             }
             Ready::Unchanged { path } => {
@@ -397,6 +420,12 @@ pub fn apply(root: &Path, actions: &[Action]) -> anyhow::Result<ExitCode> {
         println!("greenshift: nothing to change; the repository is already set up");
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// [`stage`] for `path` under `root`, with an error naming it.
+fn staged(root: &Path, path: &Path, content: &str) -> anyhow::Result<tempfile::NamedTempFile> {
+    stage(&root.join(path), content)
+        .with_context(|| format!("could not write {}; nothing written", Tainted::from(path)))
 }
 
 /// `content` in a temporary file beside `path`, creating its directory,
