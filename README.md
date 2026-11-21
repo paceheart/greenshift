@@ -9,7 +9,8 @@ filterset (`greenshift nextest-filter`) or, for any test runner, as JSON
 rich and poor groups of the current tests (`greenshift plan`).
 `greenshift run nextest` does the whole cycle with cargo-nextest: list,
 plan, run and record, and `greenshift init nextest` sets a repository up
-to do it in CI.
+to do it in CI. `greenshift run lein` and `greenshift init lein` do the
+same for Leiningen projects.
 
 ## Ingest
 
@@ -136,7 +137,8 @@ greenshift ingest target/nextest/default/junit.xml \
   otherwise validate XML well-formedness: the input is expected to come from
   a known producer.
 
-Known producers: cargo-nextest and vaelii's test runner. Anything that writes
+Known producers: cargo-nextest, vaelii's test runner and `greenshift run
+lein`'s reporter. Anything that writes
 the common `<testsuites>/<testsuite>/<testcase>` shape should work.
 
 ## Select
@@ -440,6 +442,74 @@ Exit status:
 - 1 for an error before any test runs, such as listing output that
   greenshift cannot read; 2 for a usage error.
 
+## Run lein
+
+```
+greenshift run lein [--db PATH] [--source NAME] [--commit SHA]
+                    [--branch NAME | --tag NAME] [--min-runs N]
+                    [--coverage N] [--confidence N]
+                    [--estimator wilson|empirical|smoothed]
+                    [--max-only-bytes BYTES] [-- LEIN_TEST_ARGS...]
+```
+
+`run lein` does for a Leiningen project what `run nextest` does for a
+Rust one: it lists the tests, plans them as `plan` does, runs the rich
+group and then the poor group, and records both groups' results as one
+run, one result per deftest. Run it in the project's root:
+
+```
+greenshift run lein --commit "$(git rev-parse HEAD)"
+```
+
+- **List.** One `lein test` JVM lists the tests, through lein's own
+  selection: `lein update-in :injections conj '(load-file "...")' --
+  test LEIN_TEST_ARGS`, where the injected file makes
+  `clojure.test/run-tests` write each var lein selected and run none. So
+  the listing is exactly what `lein test` would run: its discovery, its
+  `:test-selectors` (`:default` with no arguments), namespace metadata
+  and tests that macros define (`defspec`, your own). A test's suite is
+  its namespace and its name the var's. stderr says how many it listed
+  and how long that took. The listing compiles the whole test tree once,
+  and the group runs compile it about once more between them.
+- **Plan.** As `run nextest` plans, with `--source` defaulting to `lein`.
+  With `--source` the run is recorded as from that source.
+- **Run.** Each group runs in one more JVM, the rich group first, as
+  `lein update-in :injections conj '(load-file "...")' -- test :greenshift`.
+  The `:greenshift` selector, which `init lein` adds to project.clj,
+  reads the group's names from a file greenshift writes (one `ns/var`
+  per line, the path in `-Dgreenshift.names`) and loads only the
+  namespaces it names. A project without the selector (or with a
+  `:test-selectors` that is computed, `~(...)`) runs each group as
+  `lein test :only ns/var ...` instead, in batches of at most
+  `--max-only-bytes` of names (default 100,000), and stderr says so. The
+  poor group runs whether or not the rich group failed.
+- **JUnit.** The injected file also installs greenshift's JUnit reporter
+  (ported from vaelii-lacuna's run-vars reporter) and runs the group's
+  namespaces in the order the group first names them. One testcase per
+  var, with a `<failure>` per failed assertion and an `<error>` per
+  exception. An assertion in a fixture, and a fixture that throws, go on
+  a testcase named `fixtures` in the namespace; tests the group named
+  that never ran (after a fixture error, say) are skipped. The file is
+  written before lein exits, or by a shutdown hook when a test exits the
+  JVM; a JVM that fails before any test runs (a namespace that does not
+  compile) writes none, and the run is recorded as partial. Every hook
+  chains to what was there, so a project's own `clojure.test` hooks and
+  lein's output stay as they are.
+- **Record.** As `run nextest` records.
+- **LEIN_TEST_ARGS**, after `--`, go to the listing's `lein test` only:
+  selectors such as `:slow` and namespaces. The runs get only
+  `:greenshift` (or `:only` and the names): lein runs a test any one
+  selector matches, so a selector given to a run as well would add its
+  tests to the group's.
+- **Reflection.** lein writes the test form to a file without metadata
+  unless project.clj sets `:preserve-eval-meta true` (lein 2.10 and
+  later), so with `*warn-on-reflection*` on and without that key, the
+  selector's type hints are lost and lein prints reflection warnings for
+  it. greenshift's injected files never warn.
+
+Exit status: as for `run nextest`, lein's exit status in place of
+nextest's (lein exits 1 when any test fails).
+
 ## Set up a repo
 
 ```
@@ -512,6 +582,46 @@ one reached through a symlink (never followed or replaced), or one that
 cannot be read or written, with nothing written, and 2 for a usage
 error, such as a missing or malformed `--release` or `--sha256`.
 
+## Set up a lein project
+
+```
+greenshift init lein [--force]
+                     [--ci [github] --release TAG --sha256 HEX
+                      [--runs-on LABEL] [--java-version VERSION]]
+```
+
+`init lein` sets a Leiningen project up for `greenshift run lein`. Run it
+in the project's root and commit what it changes:
+
+- **project.clj.** It adds the `:greenshift` entry to the literal
+  `:test-selectors` map of the `defproject`, as the map's last entry at
+  its keys' column, with a comment saying what it is; every other byte
+  of the file, comments and layout included, stays as it was. With no
+  `:test-selectors`, it adds `:test-selectors {:greenshift ...}` after
+  the last option. With no `:default` selector, plain `lein test` still
+  runs every test: it never reads the entry. An identical entry is left
+  as it is; a different one is a conflict (exit 1, nothing written)
+  unless `--force`, which replaces its value. A computed `:test-selectors`
+  (`~(...)`) is refused (exit 1); `run lein` then uses `:only`.
+- **The workflow**, only with `--ci`: `.github/workflows/greenshift.yml`
+  (GitHub only, for now), a workflow of its own that runs `greenshift run
+  lein` with [durable history](docs/design/durable-history.md), in the
+  shape `init nextest` writes, with Temurin (`--java-version`, default
+  25), lein 2.12.0 and a cache of `~/.m2`. It is separate from the
+  project's own test workflow, which it leaves alone, and runs on pushes
+  and by hand, not on pull requests. `--release` and `--sha256` pin the
+  greenshift release as for `init nextest`, and are required with
+  `--ci`.
+
+Nothing else: no reporter in the repository, no profile and nothing in
+`~/.lein`. It prints what it changed; a second run changes nothing and
+says so. A file reached through a symlink is never read or written, and
+a conflict in either file means neither is written.
+
+Exit status: 0 when the project is set up, 1 for a conflict, a computed
+`:test-selectors`, no project.clj, or a file that cannot be read or
+written, with nothing written, and 2 for a usage error.
+
 ## Durable CI history
 
 Opt-in git-ref snapshots, stock cache integration and a separate trusted publisher
@@ -549,7 +659,9 @@ cargo build --release
 
 The test suite needs [cargo-nextest](https://nexte.st/) installed: some
 tests run it on a scratch project. Run it with `cargo nextest run`, and
-the doctests with `cargo test --doc`.
+the doctests with `cargo test --doc`. The tests of `run lein`
+(`tests/run_lein.rs`) need a JDK and `lein` on PATH, and skip without
+them unless `GREENSHIFT_REQUIRE_LEIN` is set, as CI sets it.
 
 SQLite is bundled, so release builds for `x86_64-unknown-linux-musl` are
 fully static.

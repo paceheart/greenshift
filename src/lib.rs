@@ -5,7 +5,8 @@
 //! [`nextest`] writes that choice as a cargo-nextest filterset, [`plan`]
 //! as rich and poor groups of the current tests for any runner, [`run`]
 //! lists, runs and records the tests with a test runner, [`init`] sets a
-//! repository up to do that in CI, and [`cli`]
+//! repository up to do that in CI, [`lein`] reads and edits a Leiningen
+//! project.clj for them, and [`cli`]
 //! parses the command line and dispatches. [`tainted`] holds text from
 //! outside the program so that it prints escaped.
 
