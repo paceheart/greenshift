@@ -61,8 +61,8 @@ impl Selector {
     /// The selector a project can run with: [`Selector::Names`] when
     /// `project_clj`'s literal `:test-selectors` has the `:greenshift`
     /// entry, else [`Selector::Only`], with a note to show when that is
-    /// because the entry is missing (rather than the file, which lein
-    /// itself will name).
+    /// because the entry is missing or the map computed (rather than the
+    /// file missing, which lein itself will name).
     pub fn for_project(project_clj: &Path) -> (Selector, Option<String>) {
         let Ok(text) = std::fs::read_to_string(project_clj) else {
             return (Selector::Only, None);
@@ -72,9 +72,18 @@ impl Selector {
             Ok(false) => (
                 Selector::Only,
                 Some(
-                    "project.clj has no :greenshift test selector, so each group runs \
-                     as `lein test :only ns/var ...`; `greenshift init lein` adds it"
-                        .to_owned(),
+                    if matches!(
+                        crate::lein::selectors(&text),
+                        Ok(crate::lein::Selectors::Computed)
+                    ) {
+                        "project.clj's :test-selectors is computed, so greenshift cannot \
+                         find a :greenshift selector in it, and each group runs as \
+                         `lein test :only ns/var ...`"
+                    } else {
+                        "project.clj has no :greenshift test selector, so each group runs \
+                         as `lein test :only ns/var ...`; `greenshift init lein` adds it"
+                    }
+                    .to_owned(),
                 ),
             ),
             Err(err) => (

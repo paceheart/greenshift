@@ -164,7 +164,9 @@ fn a_computed_map_is_refused_and_left_alone() {
     init(dir.path(), &[])
         .assert()
         .code(1)
-        .stderr(predicate::str::contains("computed"));
+        .stderr(predicate::str::contains("computed"))
+        // run lein cannot see an entry added by hand to a computed map.
+        .stderr(predicate::str::contains("by hand").not());
     assert_eq!(read(dir.path(), "project.clj"), text);
 }
 

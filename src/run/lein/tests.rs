@@ -231,7 +231,12 @@ fn the_selector_comes_from_project_clj() {
     assert_eq!(selector, Selector::Only);
     assert!(note.unwrap().contains("greenshift init lein"));
     std::fs::write(&clj, "(defproject a \"1\" :test-selectors ~(sel))").unwrap();
-    assert_eq!(Selector::for_project(&clj).0, Selector::Only);
+    let (selector, note) = Selector::for_project(&clj);
+    assert_eq!(selector, Selector::Only);
+    // init refuses a computed map, so the note does not send the user there.
+    let note = note.unwrap();
+    assert!(note.contains("computed"), "{note}");
+    assert!(!note.contains("init lein"), "{note}");
     let merged = match crate::lein::merge("(defproject a \"1\")", false).unwrap() {
         crate::lein::Merge::Changed(text) => text,
         other => panic!("{other:?}"),

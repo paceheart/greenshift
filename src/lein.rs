@@ -393,8 +393,8 @@ pub enum ProjectError {
     TwoGreenshiftSelectors,
     #[error(
         "project.clj's :test-selectors is computed, not a literal map, so init cannot add \
-         :greenshift to it; add the entry by hand (see the README), or leave it out and \
-         `greenshift run lein` uses `lein test :only`"
+         :greenshift to it, nor `greenshift run lein` find it there; `greenshift run lein` \
+         runs each group as `lein test :only ns/var ...` instead"
     )]
     Computed,
 }
