@@ -52,8 +52,8 @@ jobs:
         with:
           tool: cargo-nextest@0.9.143
       # tests/run_lein.rs runs `greenshift run lein` on a scratch project
-      # with real lein; GREENSHIFT_REQUIRE_LEIN (below) fails those tests,
-      # rather than skipping them, should lein be missing.
+      # with real lein; GREENSHIFT_REQUIRE_LEIN (in the job's env, above)
+      # fails those tests, rather than skipping them, should lein be missing.
       - name: Set up JDK 25
         uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
