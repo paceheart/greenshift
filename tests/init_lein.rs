@@ -491,3 +491,51 @@ fn a_conflicting_forgejo_workflow_means_project_clj_is_not_written_either() {
         .success();
     assert!(read(dir.path(), FORGEJO_WORKFLOW).contains("THIS WORKFLOW IS NOT ISOLATED"));
 }
+
+#[test]
+fn the_forgejo_workflow_is_the_github_one_but_for_what_forgejo_needs() {
+    let mut workflows = Vec::new();
+    for args in [&ci_args()[..], &forgejo_args()[..]] {
+        let dir = project(VAELII);
+        init(dir.path(), args).assert().success();
+        let path = if args.contains(&"forgejo") {
+            FORGEJO_WORKFLOW
+        } else {
+            WORKFLOW
+        };
+        let Some(workflow) = yaml(&dir.path().join(path)) else {
+            return;
+        };
+        workflows.push(workflow);
+    }
+    let (github, forgejo) = (&workflows[0], &workflows[1]);
+    assert_eq!(github["on"], forgejo["on"]);
+    assert_eq!(github["env"], forgejo["env"]);
+    for job in ["test", "publish"] {
+        let github = github["jobs"][job]["steps"].as_array().unwrap();
+        let forgejo = forgejo["jobs"][job]["steps"].as_array().unwrap();
+        assert_eq!(github.len(), forgejo.len(), "{job}");
+        for (github, forgejo) in github.iter().zip(forgejo) {
+            assert_eq!(github["name"], forgejo["name"], "{job}");
+            assert_eq!(github["run"], forgejo["run"], "{job}");
+            let (Some(github), Some(forgejo)) = (github["uses"].as_str(), forgejo["uses"].as_str())
+            else {
+                assert!(github["uses"].is_null() && forgejo["uses"].is_null());
+                continue;
+            };
+            if github.starts_with("actions/") && github.contains("-artifact@") {
+                // Forgejo's own forks: stock v4 refuses to run there.
+                assert!(
+                    forgejo.starts_with("https://code.forgejo.org/forgejo/"),
+                    "{forgejo}"
+                );
+            } else if github.starts_with("actions/checkout@") || github.starts_with("actions/cache")
+            {
+                // Forgejo's mirror: the same repository at the same commit.
+                assert_eq!(forgejo, format!("https://data.forgejo.org/{github}"));
+            } else {
+                assert_eq!(forgejo, format!("https://github.com/{github}"));
+            }
+        }
+    }
+}
