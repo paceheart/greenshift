@@ -235,15 +235,35 @@
 
 (defn- require-unhooked!
   "Load the namespace sym as lein loads a test namespace: before lein hooks
-  #'t/report, so with the multimethod mf (when it is one) as the var's
-  root, and a defmethod in sym finds it; the hooked root comes back after."
-  [mf sym]
-  (if (instance? clojure.lang.MultiFn mf)
-    (let [hooked @#'t/report]
-      (alter-var-root #'t/report (constantly mf))
-      (try (require sym)
-           (finally (alter-var-root #'t/report (constantly hooked)))))
-    (require sym)))
+  #'t/report (with robert.hooke's add-hook, which keeps the hooks and what
+  it hooked in the root's metadata, under :<ns>/hooks and :<ns>/original),
+  so with what lein hooked as the var's root. A defmethod in sym then
+  finds the multimethod, and a function sym wraps the root in stays, with
+  lein's hooks around it, as they would be had lein loaded sym first."
+  [sym]
+  (let [hooked @#'t/report
+        hooks-key (first (filter #(and (keyword? %) (= "hooks" (name %))) (keys (meta hooked))))
+        original-key (some-> hooks-key namespace (keyword "original"))
+        hooks (get (meta hooked) hooks-key)
+        original (get (meta hooked) original-key)]
+    (if-not (and (instance? clojure.lang.IDeref hooks) original)
+      (require sym)
+      (do
+        (alter-var-root #'t/report (constantly original))
+        (try (require sym)
+             (finally
+               (alter-var-root
+                #'t/report
+                (fn [now]
+                  (if (identical? now original)
+                    hooked
+                    ;; add-hook's own root, with sym's function as what it hooked
+                    (with-meta
+                      (fn [& args]
+                        (apply (reduce (fn [f hook] (fn [& args] (apply hook f args)))
+                                       now (vals @hooks))
+                               args))
+                      (assoc (meta hooked) original-key now)))))))))))
 
 (defn install!
   "Record every test var's result and write them as JUnit to junit when
@@ -325,7 +345,7 @@
                extra (vec (keep #(when-not (given %)
                                    (let [sym (symbol %)]
                                      (or (find-ns sym)
-                                         (do (require-unhooked! mf sym) (find-ns sym)))))
+                                         (do (require-unhooked! sym) (find-ns sym)))))
                                 (keys order)))
                _ (rehook! mf ours)
                aside (vec (for [ns extra

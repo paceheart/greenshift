@@ -749,6 +749,48 @@ fn a_report_method_a_namespace_greenshift_loads_defines_still_has_its_failures_r
 }
 
 #[test]
+fn a_report_wrapper_a_namespace_greenshift_loads_installs_stays_under_leins_hook() {
+    let _turn = turn();
+    if !lein_ready() {
+        return;
+    }
+    let project = Project::new();
+    project.init();
+    // Outside :test-paths, so the reporter loads this namespace itself.
+    // Loaded by lein, its wrapper would sit under lein's own report hook
+    // (which prints `lein test :only …` for a failure); so it must here.
+    std::fs::write(
+        project.root().join("src/scratch/wraps_report_in_src.clj"),
+        "(ns scratch.wraps-report-in-src (:require [clojure.test :as t :refer :all]))\n\
+         (alter-var-root #'t/report\n  \
+           (fn [report] (fn [m & more]\n    \
+             (when (= :fail (:type m)) (t/with-test-out (println \"own wrapper\" (:message m))))\n    \
+             (apply report m more))))\n\
+         (deftest fails-under-a-wrapper (is (= 1 2) \"wrapped\"))\n",
+    )
+    .unwrap();
+    let out = project.run(&["--", "scratch.wraps-report-in-src"], &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.contains("own wrapper wrapped")
+            && stdout.contains("lein test :only scratch.wraps-report-in-src/fails-under-a-wrapper"),
+        "{stdout}{}",
+        text(&out.stderr)
+    );
+    let runs = project.runs();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].results,
+        [(
+            "scratch.wraps-report-in-src".into(),
+            "fails-under-a-wrapper".into(),
+            "failed".into()
+        )]
+    );
+}
+
+#[test]
 fn each_report_is_recorded_once_however_a_chained_method_passes_it_on() {
     let _turn = turn();
     if !lein_ready() {
