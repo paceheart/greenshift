@@ -7,7 +7,7 @@
 # validation does not establish schema support. Never strip report memberships
 # or replace the publisher with a binary built by the test job.
 #
-# greenshift runs the Leiningen tests (`lein test`'s default selection),
+@SELECTION@
 # those most likely to fail first, ordered by the durable test history at
 # refs/greenshift/history (greenshift's docs/design/durable-history.md),
 # and records every deftest's result. This workflow is separate from the
@@ -101,9 +101,10 @@ jobs:
         env:
           GREENSHIFT_HISTORY_TOKEN: ${{ github.token }}
         run: |
+@READ_TEST_ARGS@
           "$RUNNER_TEMP/greenshift" run lein --history-remote "$HISTORY_REMOTE" \
 @HISTORY_FILES@
-            --commit "$GITHUB_SHA"
+            --commit "$GITHUB_SHA"@TEST_ARGS@
       - name: Upload SQLite data only
         if: ${{ !cancelled() }}
         continue-on-error: true

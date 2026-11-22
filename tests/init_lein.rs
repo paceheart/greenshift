@@ -5,7 +5,9 @@
 //! The generated workflows are compared with `tests/golden/init-lein-github.yml`
 //! and `tests/golden/init-lein-forgejo.yml`, and with `--setup` and
 //! `--project-dir` as an overlay repository such as vaelii-lacuna gives
-//! them, `tests/golden/init-lein-forgejo-overlay.yml`; after a deliberate change to a
+//! them, `tests/golden/init-lein-forgejo-overlay.yml`, and with
+//! `--test-args-file`, `tests/golden/init-lein-github-test-args.yml` and
+//! `tests/golden/init-lein-forgejo-overlay-test-args.yml`; after a deliberate change to a
 //! template, rewrite them with
 //! `GREENSHIFT_BLESS=1 cargo test --test init_lein` and review the diff.
 //!
@@ -943,5 +945,404 @@ fn the_header_names_the_flags_to_give_init_again() {
                 }
             }
         }
+    }
+}
+
+/// The arguments file of the flag the tests below give.
+const TEST_ARGS: &str = "test-selection";
+
+#[test]
+fn test_args_file_needs_ci_and_init_does_not_need_the_file() {
+    let dir = project(VAELII);
+    // Only a workflow reads it.
+    init(dir.path(), &["--test-args-file", TEST_ARGS])
+        .assert()
+        .code(2);
+    assert_eq!(read(dir.path(), "project.clj"), VAELII);
+    assert_eq!(snapshot(dir.path()).len(), 1);
+    // With --ci, the file need not be there when init runs: the setup
+    // may write it, and only the workflow reads it.
+    for (args, path) in [
+        (&ci_args()[..], WORKFLOW),
+        (&forgejo_args()[..], FORGEJO_WORKFLOW),
+    ] {
+        let dir = project(VAELII);
+        let args = [args, &["--test-args-file", TEST_ARGS]].concat();
+        init(dir.path(), &args).assert().success();
+        assert!(dir.path().join(path).exists());
+        assert!(!dir.path().join(TEST_ARGS).exists());
+        let before = snapshot(dir.path());
+        init(dir.path(), &args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("nothing to change"));
+        assert_eq!(snapshot(dir.path()), before);
+    }
+}
+
+#[test]
+fn a_bad_test_args_file_is_a_usage_error_and_nothing_is_written() {
+    let dir = project(VAELII);
+    for (bad, why) in [
+        ("", "relative to the project directory"),
+        ("/srv/args", "not an absolute path"),
+        ("../args", "no `..` parts"),
+        ("ci/../../args", "no `..` parts"),
+        (".", "a file, not a directory"),
+        ("./", "a file, not a directory"),
+        ("ci/", "a file, not a directory"),
+        ("my args", "letters, digits"),
+        ("args'", "letters, digits"),
+        ("a\nb", "letters, digits"),
+    ] {
+        for forge in [&ci_args()[..], &forgejo_args()[..]] {
+            init(dir.path(), &[forge, &["--test-args-file", bad]].concat())
+                .assert()
+                .code(2)
+                .stderr(predicate::str::contains(why));
+        }
+    }
+    assert_eq!(read(dir.path(), "project.clj"), VAELII);
+    assert_eq!(snapshot(dir.path()).len(), 1);
+}
+
+#[test]
+fn test_args_file_writes_the_golden_workflows() {
+    let dir = project(VAELII);
+    init(
+        dir.path(),
+        &[&ci_args()[..], &["--test-args-file", TEST_ARGS]].concat(),
+    )
+    .assert()
+    .success();
+    assert_golden(
+        &read(dir.path(), WORKFLOW),
+        "init-lein-github-test-args.yml",
+    );
+    // vaelii-lacuna's shape: the setup assembles the project, and the
+    // arguments file is in it.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("overlay.sh"), "#!/bin/sh\n").unwrap();
+    let args = [
+        &forgejo_args()[..],
+        &[
+            "--setup",
+            LACUNA_SETUP,
+            "--project-dir",
+            "vaelii",
+            "--test-args-file",
+            "ci/test-selection",
+        ],
+    ]
+    .concat();
+    init(dir.path(), &args).assert().success();
+    assert_golden(
+        &read(dir.path(), FORGEJO_WORKFLOW),
+        "init-lein-forgejo-overlay-test-args.yml",
+    );
+}
+
+#[test]
+fn test_args_file_changes_only_the_test_step_on_both_forges() {
+    for (extra, repo) in [
+        (&[][..], (|| project(VAELII)) as fn() -> tempfile::TempDir),
+        (&["--project-dir", "vaelii"][..], || {
+            nested("vaelii", VAELII)
+        }),
+    ] {
+        let without = both_forges(extra, repo);
+        let with_args = [extra, &["--test-args-file", "./ci//args"]].concat();
+        let workflows = both_forges(&with_args, repo);
+        for (workflow, without) in workflows.iter().zip(&without) {
+            assert_two_jobs(workflow);
+            assert_eq!(step_names(workflow, "test"), step_names(without, "test"));
+            for job in ["test", "publish"] {
+                for (step, other) in workflow["jobs"][job]["steps"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .zip(without["jobs"][job]["steps"].as_array().unwrap())
+                {
+                    if step["name"] == "Run tests and export data" {
+                        assert_eq!(without_run(step), without_run(other));
+                    } else {
+                        assert_eq!(step, other);
+                    }
+                }
+            }
+            let run = step(workflow, "test", "Run tests and export data")["run"]
+                .as_str()
+                .unwrap();
+            assert!(run.contains("mapfile -t"), "{run}");
+            assert!(run.contains("args_file='ci/args'"), "{run}");
+            assert!(
+                run.trim_end()
+                    .ends_with(r#"--commit "$GITHUB_SHA" -- "${args[@]}""#),
+                "{run}"
+            );
+            for unsafe_ in ["eval", "$(cat", "`"] {
+                assert!(!run.contains(unsafe_), "{unsafe_}: {run}");
+            }
+        }
+        assert_forges_agree(&with_args, repo);
+    }
+}
+
+/// `step` without its `run`.
+fn without_run(step: &serde_json::Value) -> serde_json::Value {
+    without(step, &["run"])
+}
+
+#[test]
+fn the_header_names_test_args_file_and_the_selection_it_runs() {
+    let default = "# greenshift runs the Leiningen tests (`lein test`'s default selection),\n";
+    for (extra, repo, again, file) in [
+        (
+            &["--test-args-file", TEST_ARGS][..],
+            project as fn(&str) -> tempfile::TempDir,
+            "# Give it the same --test-args-file too, or the new workflow goes without it.\n",
+            TEST_ARGS,
+        ),
+        (
+            &["--project-dir", "vaelii", "--test-args-file", TEST_ARGS][..],
+            |text| nested("vaelii", text),
+            "# Give it the same --project-dir and --test-args-file too, or the new workflow\n\
+             # goes without them.\n",
+            "vaelii/test-selection",
+        ),
+        (
+            &[
+                "--setup",
+                "make",
+                "--project-dir",
+                "vaelii",
+                "--test-args-file",
+                TEST_ARGS,
+            ][..],
+            |text| nested("vaelii", text),
+            "# Give it the same --setup, --project-dir and --test-args-file too, or the new\n\
+             # workflow goes without them.\n",
+            "vaelii/test-selection",
+        ),
+    ] {
+        for (args, path) in [
+            (&ci_args()[..], WORKFLOW),
+            (&forgejo_args()[..], FORGEJO_WORKFLOW),
+        ] {
+            let dir = repo(VAELII);
+            init(dir.path(), &[args, extra].concat()).assert().success();
+            let written = read(dir.path(), path);
+            let header: String = written
+                .lines()
+                .take_while(|line| line.starts_with('#'))
+                .map(|line| format!("{line}\n"))
+                .collect();
+            assert!(header.contains(again), "{extra:?}: {header}");
+            assert!(!header.contains(default), "{extra:?}: {header}");
+            assert!(
+                words(&header).contains(&format!(
+                    "the Leiningen tests (those `lein test` selects with the arguments in {file}, \
+                     one per line, from --test-args-file),"
+                )),
+                "{extra:?}: {header}"
+            );
+        }
+    }
+    // Without it, the header says the default selection, as before.
+    let dir = project(VAELII);
+    init(dir.path(), &ci_args()).assert().success();
+    assert!(read(dir.path(), WORKFLOW).contains(default));
+}
+
+/// `text`'s words, one space apart, its comment markers dropped.
+fn words(text: &str) -> String {
+    text.split_whitespace()
+        .filter(|word| *word != "#")
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// What the workflow's test step does, run in bash as the forge runs it
+/// (`bash --noprofile --norc -eo pipefail`), in a scratch workspace with
+/// `files` in the project directory and a stub greenshift that records
+/// its arguments.
+struct TestStep {
+    ok: bool,
+    stdout: String,
+    /// The stub's arguments, if it ran.
+    argv: Option<Vec<String>>,
+    /// The project directory the step ran in.
+    _workspace: tempfile::TempDir,
+    project: PathBuf,
+}
+
+fn run_test_step(workflow: &serde_json::Value, files: &[(&str, &[u8])]) -> TestStep {
+    let run = step(workflow, "test", "Run tests and export data");
+    assert_eq!(run["shell"], "bash");
+    let script = run["run"].as_str().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let project = match run["working-directory"].as_str() {
+        Some(dir) => workspace.path().join(dir),
+        None => workspace.path().to_owned(),
+    };
+    std::fs::create_dir_all(&project).unwrap();
+    for (name, content) in files {
+        let path = project.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+    let temp = workspace.path().join("runner-temp");
+    std::fs::create_dir(&temp).unwrap();
+    let argv_file = workspace.path().join("argv");
+    let stub = temp.join("greenshift");
+    std::fs::write(
+        &stub,
+        "#!/usr/bin/env bash\nprintf '%s\\0' \"$@\" > \"$GREENSHIFT_TEST_ARGV\"\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let output = std::process::Command::new("bash")
+        .args(["--noprofile", "--norc", "-eo", "pipefail", "-c", script])
+        .current_dir(&project)
+        .env("RUNNER_TEMP", &temp)
+        .env("GITHUB_WORKSPACE", workspace.path())
+        .env("GITHUB_SHA", "f".repeat(40))
+        .env("HISTORY_REMOTE", "https://example.invalid/repo.git")
+        .env("GREENSHIFT_TEST_ARGV", &argv_file)
+        .output()
+        .unwrap();
+    let argv = std::fs::read(&argv_file).ok().map(|bytes| {
+        bytes
+            .split(|b| *b == 0)
+            .map(|arg| String::from_utf8(arg.to_vec()).unwrap())
+            .collect::<Vec<_>>()
+    });
+    // `printf '%s\0'` ends every argument with a NUL: drop the empty
+    // piece after the last.
+    let argv = argv.map(|mut argv| {
+        assert_eq!(argv.pop().as_deref(), Some(""));
+        argv
+    });
+    TestStep {
+        ok: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        argv,
+        _workspace: workspace,
+        project,
+    }
+}
+
+/// The arguments greenshift was given after `--`, which it gives `lein
+/// test`, checking that what comes before is the workflow's own.
+fn lein_args(argv: &[String]) -> Vec<String> {
+    let at = argv
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or_else(|| panic!("no -- in {argv:?}"));
+    assert_eq!(&argv[..3], ["run", "lein", "--history-remote"], "{argv:?}");
+    assert_eq!(argv[at - 2..at], ["--commit".to_owned(), "f".repeat(40)]);
+    argv[at + 1..].to_vec()
+}
+
+#[test]
+fn the_test_step_passes_each_line_of_the_file_as_one_argument() {
+    for (extra, repo) in [
+        (
+            &["--test-args-file", "ci/args"][..],
+            (|| project(VAELII)) as fn() -> tempfile::TempDir,
+        ),
+        (
+            &["--project-dir", "vaelii", "--test-args-file", "ci/args"][..],
+            || nested("vaelii", VAELII),
+        ),
+    ] {
+        for workflow in &both_forges(extra, repo) {
+            // Three arguments, blank lines between (one empty, one only
+            // whitespace), and no newline at the end.
+            let ran = run_test_step(
+                workflow,
+                &[(
+                    "ci/args",
+                    b":integration\n\nvaelii.core-test\n \t \n:only vaelii.x/y",
+                )],
+            );
+            assert!(ran.ok, "{}", ran.stdout);
+            assert_eq!(
+                lein_args(&ran.argv.unwrap()),
+                [":integration", "vaelii.core-test", ":only vaelii.x/y"]
+            );
+            // Nothing in a line is the shell's: each is one literal argument.
+            let lines = [
+                "has spaces $(touch x) `touch y` ${HOME}",
+                "*",
+                "-v",
+                "--",
+                "'quoted' \"too\"",
+                "  padded  ",
+                "a\\nb;touch z",
+            ];
+            let ran = run_test_step(workflow, &[("ci/args", lines.join("\n").as_bytes())]);
+            assert!(ran.ok, "{}", ran.stdout);
+            assert_eq!(lein_args(&ran.argv.unwrap()), lines);
+            for made in ["x", "y", "z"] {
+                assert!(!ran.project.join(made).exists(), "{made}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_missing_or_empty_arguments_file_fails_the_test_step() {
+    for (extra, repo, shown) in [
+        (
+            &["--test-args-file", "ci/args"][..],
+            (|| project(VAELII)) as fn() -> tempfile::TempDir,
+            "ci/args",
+        ),
+        (
+            &["--project-dir", "vaelii", "--test-args-file", "ci/args"][..],
+            || nested("vaelii", VAELII),
+            "vaelii/ci/args",
+        ),
+    ] {
+        for workflow in &both_forges(extra, repo) {
+            for (files, why) in [
+                (&[][..], "is missing"),
+                // Elsewhere than where the step looks is missing too.
+                (&[("args", &b"a\n"[..])][..], "is missing"),
+                (&[("ci/args/x", &b"a\n"[..])][..], "is missing"),
+                (&[("ci/args", &b""[..])][..], "has no arguments"),
+                (&[("ci/args", &b"\n\n\n"[..])][..], "has no arguments"),
+                (&[("ci/args", &b"  \n\t\n \t "[..])][..], "has no arguments"),
+                (&[("ci/args", &b"a\r\nb\r\n"[..])][..], "carriage return"),
+                (&[("ci/args", &b"a\0b\n"[..])][..], "NUL"),
+            ] {
+                let ran = run_test_step(workflow, files);
+                assert!(!ran.ok, "{files:?}: {}", ran.stdout);
+                assert!(ran.argv.is_none(), "greenshift ran: {files:?}");
+                assert!(
+                    ran.stdout.contains(&format!("::error::{shown} ")),
+                    "{files:?}: {}",
+                    ran.stdout
+                );
+                assert!(ran.stdout.contains(why), "{files:?}: {}", ran.stdout);
+                assert!(ran.stdout.contains("--test-args-file"), "{}", ran.stdout);
+            }
+        }
+    }
+}
+
+#[test]
+fn without_test_args_file_the_test_step_passes_no_lein_arguments() {
+    for workflow in &both_forges(&[], || project(VAELII)) {
+        let ran = run_test_step(workflow, &[]);
+        assert!(ran.ok, "{}", ran.stdout);
+        let argv = ran.argv.unwrap();
+        assert!(!argv.contains(&"--".to_owned()), "{argv:?}");
+        assert_eq!(argv.last().unwrap(), &"f".repeat(40));
     }
 }

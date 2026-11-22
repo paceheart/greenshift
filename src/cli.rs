@@ -181,6 +181,15 @@ pub struct InitLeinArgs {
     #[arg(long, value_name = "CMD", requires = "ci")]
     pub setup: Option<crate::init::lein::SetupCommand>,
 
+    /// A file of `lein test` arguments, relative to the project directory
+    /// (--project-dir, or the root), one per line, blank lines skipped:
+    /// the workflow's test step reads it, after --setup, and runs
+    /// `greenshift run lein -- ARGS` rather than `lein test`'s default
+    /// selection. It need not be there when init runs, but a missing or
+    /// empty one fails the step.
+    #[arg(long, value_name = "FILE", requires = "ci")]
+    pub test_args_file: Option<crate::init::lein::TestArgsFile>,
+
     /// Replace a :greenshift selector or a workflow that exists and differs.
     #[arg(long)]
     pub force: bool,
@@ -708,6 +717,7 @@ pub fn init_lein(args: &InitLeinArgs, root: &std::path::Path) -> anyhow::Result<
             java: &java,
             project: &project,
             setup: args.setup.as_ref(),
+            test_args: args.test_args_file.as_ref(),
         };
         actions.extend(init::decide(
             root,
