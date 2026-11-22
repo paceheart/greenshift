@@ -509,18 +509,43 @@ fn the_forgejo_workflow_is_the_github_one_but_for_what_forgejo_needs() {
         workflows.push(workflow);
     }
     let (github, forgejo) = (&workflows[0], &workflows[1]);
-    assert_eq!(github["on"], forgejo["on"]);
-    assert_eq!(github["env"], forgejo["env"]);
+    // Everything but the jobs is the same; `permissions` are GitHub's
+    // alone, as Forgejo ignores them.
+    assert_eq!(
+        without(github, &["jobs", "permissions"]),
+        without(forgejo, &["jobs", "permissions"])
+    );
+    assert_eq!(
+        github["jobs"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        forgejo["jobs"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>()
+    );
     for job in ["test", "publish"] {
-        let github = github["jobs"][job]["steps"].as_array().unwrap();
-        let forgejo = forgejo["jobs"][job]["steps"].as_array().unwrap();
+        let (github, forgejo) = (&github["jobs"][job], &forgejo["jobs"][job]);
+        // `if`, `needs`, `concurrency`, `env` and the rest; `runs-on` is
+        // each forge's default runner.
+        assert_eq!(
+            without(github, &["steps", "permissions", "runs-on"]),
+            without(forgejo, &["steps", "permissions", "runs-on"]),
+            "{job}"
+        );
+        let github = github["steps"].as_array().unwrap();
+        let forgejo = forgejo["steps"].as_array().unwrap();
         assert_eq!(github.len(), forgejo.len(), "{job}");
         for (github, forgejo) in github.iter().zip(forgejo) {
-            assert_eq!(github["name"], forgejo["name"], "{job}");
-            assert_eq!(github["run"], forgejo["run"], "{job}");
+            let (mut github_step, forgejo_step) =
+                (without(github, &["uses"]), without(forgejo, &["uses"]));
             let (Some(github), Some(forgejo)) = (github["uses"].as_str(), forgejo["uses"].as_str())
             else {
                 assert!(github["uses"].is_null() && forgejo["uses"].is_null());
+                assert_eq!(github_step, forgejo_step, "{job}");
                 continue;
             };
             if github.starts_with("actions/") && github.contains("-artifact@") {
@@ -529,6 +554,12 @@ fn the_forgejo_workflow_is_the_github_one_but_for_what_forgejo_needs() {
                     forgejo.starts_with("https://code.forgejo.org/forgejo/"),
                     "{forgejo}"
                 );
+                if github.contains("upload-artifact@") {
+                    // The fork, v4.3.1, has no such input: it predates
+                    // leaving hidden files out by default.
+                    let with = github_step["with"].as_object_mut().unwrap();
+                    assert_eq!(with.remove("include-hidden-files"), Some(true.into()));
+                }
             } else if github.starts_with("actions/checkout@") || github.starts_with("actions/cache")
             {
                 // Forgejo's mirror: the same repository at the same commit.
@@ -536,6 +567,18 @@ fn the_forgejo_workflow_is_the_github_one_but_for_what_forgejo_needs() {
             } else {
                 assert_eq!(forgejo, format!("https://github.com/{github}"));
             }
+            // Name, `id`, `if`, `with`, `env`, `run` and the rest.
+            assert_eq!(github_step, forgejo_step, "{job}: {github}");
         }
     }
+}
+
+/// `value`, a JSON object, without `keys`.
+fn without(value: &serde_json::Value, keys: &[&str]) -> serde_json::Value {
+    let mut value = value.clone();
+    let object = value.as_object_mut().unwrap();
+    for key in keys {
+        object.remove(*key);
+    }
+    value
 }
