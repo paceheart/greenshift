@@ -899,3 +899,49 @@ fn an_overlay_repository_assembles_its_project_in_setup() {
     .stderr(predicate::str::contains("no vaelii/project.clj"));
     assert_eq!(snapshot(dir.path()), before);
 }
+
+#[test]
+fn the_header_names_the_flags_to_give_init_again() {
+    let setup_line = "# Give it the same --setup too, or the new workflow goes without it.\n";
+    let dir_line = "# Give it the same --project-dir too, or the new workflow goes without it.\n";
+    let both_lines = "# Give it the same --setup and --project-dir too, or the new workflow goes\n\
+                      # without them.\n";
+    for (extra, repo, wanted) in [
+        (
+            &["--setup", "make"][..],
+            project as fn(&str) -> tempfile::TempDir,
+            setup_line,
+        ),
+        (
+            &["--project-dir", "vaelii"][..],
+            |text| nested("vaelii", text),
+            dir_line,
+        ),
+        (
+            &["--setup", "make", "--project-dir", "vaelii"][..],
+            |text| nested("vaelii", text),
+            both_lines,
+        ),
+    ] {
+        for (args, path) in [
+            (&ci_args()[..], WORKFLOW),
+            (&forgejo_args()[..], FORGEJO_WORKFLOW),
+        ] {
+            let dir = repo(VAELII);
+            init(dir.path(), &[args, extra].concat()).assert().success();
+            let written = read(dir.path(), path);
+            let header: String = written
+                .lines()
+                .take_while(|line| line.starts_with('#'))
+                .take(5)
+                .map(|line| format!("{line}\n"))
+                .collect();
+            assert!(header.contains(wanted), "{extra:?}: {header}");
+            for other in [setup_line, dir_line, both_lines] {
+                if other != wanted {
+                    assert!(!written.contains(other), "{extra:?}: {header}");
+                }
+            }
+        }
+    }
+}
