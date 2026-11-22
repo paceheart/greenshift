@@ -592,13 +592,15 @@ error, such as a missing or malformed `--release` or `--sha256`.
 ## Set up a lein project
 
 ```
-greenshift init lein [--force]
+greenshift init lein [--force] [--project-dir DIR]
                      [--ci [github|forgejo] --release TAG --sha256 HEX
-                      [--runs-on LABEL] [--java-version VERSION]]
+                      [--runs-on LABEL] [--java-version VERSION]
+                      [--setup CMD]]
 ```
 
 `init lein` sets a Leiningen project up for `greenshift run lein`. Run it
-in the project's root and commit what it changes:
+in the project's root, or in the repository's root with `--project-dir`,
+and commit what it changes:
 
 - **project.clj.** It adds the `:greenshift` entry to the literal
   `:test-selectors` map of the `defproject`, as the map's last entry at
@@ -628,6 +630,35 @@ in the project's root and commit what it changes:
   `.forgejo/workflows` would stop other workflows running. Its JDK and
   Leiningen steps are fetched from github.com, so the runner needs to
   reach it.
+- **`--project-dir DIR`**, for a project that is not at the repository's
+  root: a relative path inside the repository (no `..` parts, not
+  absolute; `.` is the root). `init` edits `DIR/project.clj`, and the
+  workflow runs `greenshift run lein` with `DIR` as its working directory
+  and keys the `~/.m2` cache on `DIR/project.clj`. greenshift's own
+  history cache and artifact stay in `.greenshift` at the repository's
+  root.
+- **`--setup CMD`**, with `--ci`: a shell command the workflow runs in
+  bash, in the repository's root, as a step of its own after the JDK and
+  Leiningen are set up and before the tests, for a repository whose
+  project CI assembles. Give it once; for several commands, join them
+  or call a script. It goes into the workflow as given, `${{ }}`
+  expressions included, which the forge evaluates. With `--project-dir`,
+  `DIR/project.clj` may then be missing when `init` runs: it says so,
+  and leaves the selector for the command to add (without it, `run
+  lein` uses `:only`). For example, a repository that overlays upstream
+  vaelii, as vaelii-lacuna does, checking it out into `vaelii`:
+
+  ```
+  greenshift init lein --ci forgejo --release TAG --sha256 HEX \
+    --project-dir vaelii \
+    --setup 'tools/fetch-upstream.sh vaelii && VAELII_UPSTREAM="$PWD/vaelii" ./overlay.sh'
+  ```
+
+  [tests/golden/init-lein-forgejo-overlay.yml](tests/golden/init-lein-forgejo-overlay.yml)
+  is the workflow for such a setup, written out in full.
+
+  Running `init` again to pin a new release needs the same `--setup` and
+  `--project-dir`, as the workflow's header says.
 
 Nothing else: no reporter in the repository, no profile and nothing in
 `~/.lein`. It prints what it changed; a second run changes nothing and

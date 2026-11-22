@@ -3,7 +3,9 @@
 //! run changes nothing, `--force`, and what it refuses.
 //!
 //! The generated workflows are compared with `tests/golden/init-lein-github.yml`
-//! and `tests/golden/init-lein-forgejo.yml`; after a deliberate change to a
+//! and `tests/golden/init-lein-forgejo.yml`, and with `--setup` and
+//! `--project-dir` as an overlay repository such as vaelii-lacuna gives
+//! them, `tests/golden/init-lein-forgejo-overlay.yml`; after a deliberate change to a
 //! template, rewrite them with
 //! `GREENSHIFT_BLESS=1 cargo test --test init_lein` and review the diff.
 //!
@@ -489,19 +491,31 @@ fn a_conflicting_forgejo_workflow_means_project_clj_is_not_written_either() {
 
 #[test]
 fn the_forgejo_workflow_is_the_github_one_but_for_what_forgejo_needs() {
+    assert_forges_agree(&[], || project(VAELII));
+}
+
+/// The workflows `init lein --ci github` and `--ci forgejo` write with
+/// `extra` arguments, into a fresh `repo()` each, as JSON.
+fn both_forges(extra: &[&str], repo: impl Fn() -> tempfile::TempDir) -> [serde_json::Value; 2] {
     let mut workflows = Vec::new();
     for args in [&ci_args()[..], &forgejo_args()[..]] {
-        let dir = project(VAELII);
-        init(dir.path(), args).assert().success();
+        let dir = repo();
+        init(dir.path(), &[args, extra].concat()).assert().success();
         let path = if args.contains(&"forgejo") {
             FORGEJO_WORKFLOW
         } else {
             WORKFLOW
         };
-        let workflow = yaml(&dir.path().join(path));
-        workflows.push(workflow);
+        workflows.push(yaml(&dir.path().join(path)));
     }
-    let (github, forgejo) = (&workflows[0], &workflows[1]);
+    workflows.try_into().unwrap()
+}
+
+/// The Forgejo workflow `init lein` writes with `extra` arguments is the
+/// GitHub one, step for step, but for what Forgejo needs.
+fn assert_forges_agree(extra: &[&str], repo: impl Fn() -> tempfile::TempDir) {
+    let [github, forgejo] = both_forges(extra, repo);
+    let (github, forgejo) = (&github, &forgejo);
     // Everything but the jobs is the same; `permissions` are GitHub's
     // alone, as Forgejo ignores them.
     assert_eq!(
@@ -574,4 +588,360 @@ fn without(value: &serde_json::Value, keys: &[&str]) -> serde_json::Value {
         object.remove(*key);
     }
     value
+}
+
+/// A repository with no project.clj at its root, and `text` as the
+/// project.clj of the project in `subdir`.
+fn nested(subdir: &str, text: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(subdir)).unwrap();
+    std::fs::write(dir.path().join(subdir).join("project.clj"), text).unwrap();
+    dir
+}
+
+/// The step of `job` named `name`.
+fn step<'w>(workflow: &'w serde_json::Value, job: &str, name: &str) -> &'w serde_json::Value {
+    workflow["jobs"][job]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == name)
+        .unwrap_or_else(|| panic!("{job} has no step {name:?}"))
+}
+
+#[test]
+fn project_dir_names_the_project_clj_init_edits() {
+    let dir = nested("upstream/app", VAELII);
+    init(dir.path(), &["--project-dir", "upstream/app"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "added the :greenshift test selector to upstream/app/project.clj",
+        ));
+    assert_eq!(
+        read(dir.path(), "upstream/app/project.clj"),
+        merged_vaelii(VAELII)
+    );
+    assert_eq!(
+        snapshot(dir.path()).len(),
+        1,
+        "only the project.clj is there"
+    );
+    init(dir.path(), &["--project-dir", "./upstream/app/"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "upstream/app/project.clj is already up to date",
+        ));
+    // Without it, the root's project.clj is the one, and there is none.
+    init(dir.path(), &[])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("no project.clj"));
+}
+
+#[test]
+fn project_dir_without_a_project_clj_is_an_error_naming_it() {
+    let dir = project(VAELII);
+    init(
+        dir.path(),
+        &[&ci_args()[..], &["--project-dir", "vaelii"]].concat(),
+    )
+    .assert()
+    .code(1)
+    .stderr(predicate::str::contains("no vaelii/project.clj"))
+    .stderr(
+        predicate::str::contains("nothing written").or(predicate::str::contains("Nothing written")),
+    );
+    assert_eq!(read(dir.path(), "project.clj"), VAELII);
+    assert!(!dir.path().join(".github").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_project_dir_is_refused_and_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("real")).unwrap();
+    std::fs::write(dir.path().join("real/project.clj"), VAELII).unwrap();
+    std::os::unix::fs::symlink("real", dir.path().join("vaelii")).unwrap();
+    init(dir.path(), &["--project-dir", "vaelii"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("symlink"));
+    assert_eq!(read(dir.path(), "real/project.clj"), VAELII);
+}
+
+#[test]
+fn a_bad_project_dir_is_a_usage_error_and_nothing_is_written() {
+    let dir = project(VAELII);
+    for (bad, why) in [
+        ("", "relative to the repository root"),
+        ("/srv/vaelii", "not an absolute path"),
+        ("../vaelii", "no `..` parts"),
+        ("vaelii/../..", "no `..` parts"),
+        ("vaelii/..", "no `..` parts"),
+        ("my project", "letters, digits"),
+    ] {
+        for forge in [&ci_args()[..], &forgejo_args()[..], &[]] {
+            init(dir.path(), &[forge, &["--project-dir", bad]].concat())
+                .assert()
+                .code(2)
+                .stderr(predicate::str::contains(why));
+        }
+    }
+    assert_eq!(read(dir.path(), "project.clj"), VAELII);
+    assert_eq!(snapshot(dir.path()).len(), 1);
+}
+
+#[test]
+fn project_dir_dot_is_the_root_and_writes_the_golden_workflows() {
+    for (args, path, golden) in [
+        (&ci_args()[..], WORKFLOW, "init-lein-github.yml"),
+        (
+            &forgejo_args()[..],
+            FORGEJO_WORKFLOW,
+            "init-lein-forgejo.yml",
+        ),
+    ] {
+        let dir = project(VAELII);
+        init(dir.path(), &[args, &["--project-dir", "."]].concat())
+            .assert()
+            .success();
+        assert_golden(&read(dir.path(), path), golden);
+        assert_eq!(read(dir.path(), "project.clj"), merged_vaelii(VAELII));
+    }
+}
+
+#[test]
+fn project_dir_runs_lein_there_on_both_forges() {
+    let workflows = both_forges(&["--project-dir", "vaelii"], || nested("vaelii", VAELII));
+    for workflow in &workflows {
+        assert_two_jobs(workflow);
+        let run = step(workflow, "test", "Run tests and export data");
+        assert_eq!(run["working-directory"], "vaelii");
+        // greenshift's own files stay at the repository root, where the
+        // cache steps and the publisher look for them.
+        let command = run["run"].as_str().unwrap();
+        assert!(
+            command.contains(r#"--history-cache-dir "$GITHUB_WORKSPACE/.greenshift/cache""#),
+            "{command}"
+        );
+        assert!(
+            command
+                .contains(r#"--history-artifact "$GITHUB_WORKSPACE/.greenshift/publish.sqlite""#),
+            "{command}"
+        );
+        assert_eq!(
+            step(workflow, "test", "Restore fast copy")["with"]["path"],
+            ".greenshift/cache"
+        );
+        assert_eq!(
+            step(workflow, "test", "Upload SQLite data only")["with"]["path"],
+            ".greenshift/publish.sqlite"
+        );
+        let key = step(workflow, "test", "Cache Maven dependencies")["with"]["key"]
+            .as_str()
+            .unwrap();
+        assert!(
+            key.ends_with("${{ hashFiles('vaelii/project.clj') }}"),
+            "{key}"
+        );
+        // Only the step that runs lein runs elsewhere.
+        for job in ["test", "publish"] {
+            for other in workflow["jobs"][job]["steps"].as_array().unwrap() {
+                if other["name"] != "Run tests and export data" {
+                    assert!(other["working-directory"].is_null(), "{other}");
+                }
+            }
+        }
+    }
+    assert_forges_agree(&["--project-dir", "vaelii"], || nested("vaelii", VAELII));
+}
+
+/// The names of `job`'s steps, in order.
+fn step_names(workflow: &serde_json::Value, job: &str) -> Vec<String> {
+    workflow["jobs"][job]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|step| step["name"].as_str().unwrap_or("").to_owned())
+        .collect()
+}
+
+#[test]
+fn setup_runs_in_the_root_after_the_toolchain_and_before_the_tests_on_both_forges() {
+    let without = both_forges(&[], || project(VAELII));
+    let workflows = both_forges(&["--setup", "make assemble"], || project(VAELII));
+    for (workflow, without) in workflows.iter().zip(&without) {
+        assert_two_jobs(workflow);
+        let names = step_names(workflow, "test");
+        let at = |name: &str| names.iter().position(|n| n == name).unwrap();
+        let setup = at("Set up the project");
+        assert!(at("Set up Leiningen") < setup, "{names:?}");
+        assert!(setup < at("Cache Maven dependencies"), "{names:?}");
+        assert!(setup < at("Run tests and export data"), "{names:?}");
+        // One step more, and nothing else changed.
+        let mut names_without = step_names(without, "test");
+        names_without.insert(setup, "Set up the project".to_owned());
+        assert_eq!(names, names_without);
+        let step = step(workflow, "test", "Set up the project");
+        assert_eq!(step["run"], "make assemble\n");
+        assert_eq!(step["shell"], "bash");
+        assert!(step["working-directory"].is_null());
+        assert!(step["uses"].is_null() && step["if"].is_null());
+        assert_eq!(
+            step_names(workflow, "publish"),
+            step_names(without, "publish")
+        );
+    }
+    assert_forges_agree(&["--setup", "make assemble"], || project(VAELII));
+    assert_forges_agree(
+        &["--setup", "make assemble", "--project-dir", "vaelii"],
+        || nested("vaelii", VAELII),
+    );
+}
+
+#[test]
+fn the_setup_command_reaches_the_workflow_as_given() {
+    let command = "set -x\n# a comment: with 'quotes' and \"more\"\nif true; then\n\techo @RELEASE@ ${{ 1 }} |\n  cat\n\nfi";
+    for (args, path) in [
+        (&ci_args()[..], WORKFLOW),
+        (&forgejo_args()[..], FORGEJO_WORKFLOW),
+    ] {
+        let dir = project(VAELII);
+        init(
+            dir.path(),
+            &[args, &["--setup", &format!("\n  {command}  \n\n")]].concat(),
+        )
+        .assert()
+        .success();
+        let workflow = yaml(&dir.path().join(path));
+        assert_eq!(
+            step(&workflow, "test", "Set up the project")["run"],
+            format!("{command}\n")
+        );
+        // The command's own `@RELEASE@` is its own, not a placeholder.
+        assert_eq!(read(dir.path(), path).matches(RELEASE).count(), 1);
+    }
+}
+
+#[test]
+fn a_bad_setup_is_a_usage_error_and_nothing_is_written() {
+    let dir = project(VAELII);
+    for (bad, why) in [
+        ("", "not an empty one"),
+        (" \n\t", "not an empty one"),
+        ("make\r\nall", "no carriage returns"),
+    ] {
+        for forge in [&ci_args()[..], &forgejo_args()[..]] {
+            init(dir.path(), &[forge, &["--setup", bad]].concat())
+                .assert()
+                .code(2)
+                .stderr(predicate::str::contains(why));
+        }
+    }
+    // Only a workflow runs it.
+    init(dir.path(), &["--setup", "make"]).assert().code(2);
+    assert_eq!(read(dir.path(), "project.clj"), VAELII);
+    assert_eq!(snapshot(dir.path()).len(), 1);
+}
+
+/// vaelii-lacuna's setup, as its own Forgejo CI does it: check out
+/// upstream vaelii at the commit overlay.sh pins, then apply the overlay.
+const LACUNA_SETUP: &str = r#"pin="$(sed -n 's/^PINNED_BASE_SHA="\([0-9a-f]\{40\}\)"$/\1/p' overlay.sh)"
+[ "${#pin}" -eq 40 ] || { echo "no PINNED_BASE_SHA in overlay.sh" >&2; exit 1; }
+git init -q vaelii
+git -C vaelii fetch -q --depth 1 https://github.com/vaelii/vaelii.git "$pin"
+git -C vaelii checkout -q --detach FETCH_HEAD
+VAELII_UPSTREAM="$PWD/vaelii" ./overlay.sh"#;
+
+#[test]
+fn an_overlay_repository_assembles_its_project_in_setup() {
+    // No project at the root, nor in vaelii/ until the setup makes it.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("overlay.sh"), "#!/bin/sh\n").unwrap();
+    let args = [
+        &forgejo_args()[..],
+        &["--setup", LACUNA_SETUP, "--project-dir", "vaelii"],
+    ]
+    .concat();
+    init(dir.path(), &args)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "no vaelii/project.clj here, so the :greenshift test selector is not added",
+        ));
+    let written = read(dir.path(), FORGEJO_WORKFLOW);
+    assert_golden(&written, "init-lein-forgejo-overlay.yml");
+    assert!(!dir.path().join("vaelii").exists());
+    let workflow = yaml(&dir.path().join(FORGEJO_WORKFLOW));
+    assert_eq!(
+        step(&workflow, "test", "Set up the project")["run"],
+        format!("{LACUNA_SETUP}\n")
+    );
+    assert_eq!(
+        step(&workflow, "test", "Run tests and export data")["working-directory"],
+        "vaelii"
+    );
+    let before = snapshot(dir.path());
+    init(dir.path(), &args)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nothing to change"));
+    assert_eq!(snapshot(dir.path()), before);
+    // Without a setup to make it, a missing project.clj is still an error.
+    init(
+        dir.path(),
+        &[&forgejo_args()[..], &["--project-dir", "vaelii", "--force"]].concat(),
+    )
+    .assert()
+    .code(1)
+    .stderr(predicate::str::contains("no vaelii/project.clj"));
+    assert_eq!(snapshot(dir.path()), before);
+}
+
+#[test]
+fn the_header_names_the_flags_to_give_init_again() {
+    let setup_line = "# Give it the same --setup too, or the new workflow goes without it.\n";
+    let dir_line = "# Give it the same --project-dir too, or the new workflow goes without it.\n";
+    let both_lines = "# Give it the same --setup and --project-dir too, or the new workflow goes\n\
+                      # without them.\n";
+    for (extra, repo, wanted) in [
+        (
+            &["--setup", "make"][..],
+            project as fn(&str) -> tempfile::TempDir,
+            setup_line,
+        ),
+        (
+            &["--project-dir", "vaelii"][..],
+            |text| nested("vaelii", text),
+            dir_line,
+        ),
+        (
+            &["--setup", "make", "--project-dir", "vaelii"][..],
+            |text| nested("vaelii", text),
+            both_lines,
+        ),
+    ] {
+        for (args, path) in [
+            (&ci_args()[..], WORKFLOW),
+            (&forgejo_args()[..], FORGEJO_WORKFLOW),
+        ] {
+            let dir = repo(VAELII);
+            init(dir.path(), &[args, extra].concat()).assert().success();
+            let written = read(dir.path(), path);
+            let header: String = written
+                .lines()
+                .take_while(|line| line.starts_with('#'))
+                .take(5)
+                .map(|line| format!("{line}\n"))
+                .collect();
+            assert!(header.contains(wanted), "{extra:?}: {header}");
+            for other in [setup_line, dir_line, both_lines] {
+                if other != wanted {
+                    assert!(!written.contains(other), "{extra:?}: {header}");
+                }
+            }
+        }
+    }
 }
