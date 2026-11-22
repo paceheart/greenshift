@@ -60,6 +60,126 @@ impl std::str::FromStr for JavaVersion {
     }
 }
 
+/// Where the Leiningen project is, relative to the repository root, as
+/// `--project-dir` gives it: `/`-separated parts of letters, digits and
+/// `.`, `_`, `-`, so that it goes into YAML and a `hashFiles` pattern as
+/// it is. `.` parts, empty ones and a trailing `/` are dropped, so
+/// `./vaelii/` is `vaelii`, and `.` is the root itself.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProjectDir(String);
+
+impl ProjectDir {
+    /// The directory as the workflow names it, with no trailing `/`;
+    /// empty for the root.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether this is the repository root itself.
+    pub fn is_root(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// `name` in the directory, relative to the repository root.
+    pub fn join(&self, name: &str) -> String {
+        if self.is_root() {
+            name.to_owned()
+        } else {
+            format!("{}/{name}", self.0)
+        }
+    }
+}
+
+/// Why a `--project-dir` was refused. No message repeats the value: clap
+/// names it already.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ProjectDirError {
+    #[error("expected a directory relative to the repository root, such as upstream/app")]
+    Empty,
+    #[error("expected a directory relative to the repository root, not an absolute path")]
+    Absolute,
+    #[error("expected a directory inside the repository: no `..` parts")]
+    Parent,
+    #[error(
+        "expected a directory of at most 1024 letters, digits, '.', '_', '-' and '/' separators"
+    )]
+    Chars,
+}
+
+impl std::str::FromStr for ProjectDir {
+    type Err = ProjectDirError;
+
+    fn from_str(text: &str) -> Result<ProjectDir, ProjectDirError> {
+        if text.is_empty() {
+            return Err(ProjectDirError::Empty);
+        }
+        if text.starts_with('/') {
+            return Err(ProjectDirError::Absolute);
+        }
+        let parts: Vec<&str> = text
+            .split('/')
+            .filter(|part| !part.is_empty() && *part != ".")
+            .collect();
+        if parts.contains(&"..") {
+            return Err(ProjectDirError::Parent);
+        }
+        let ok = text.len() <= 1024
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-/".contains(&b));
+        if !ok {
+            return Err(ProjectDirError::Chars);
+        }
+        Ok(ProjectDir(parts.join("/")))
+    }
+}
+
+/// A shell command for `--setup`, which the workflow runs in bash, in
+/// the repository root, as a step of its own before the tests: kept as
+/// given, but for leading and trailing whitespace, and with nothing a
+/// YAML block scalar cannot hold as it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupCommand(String);
+
+impl SetupCommand {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Why a `--setup` was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SetupCommandError {
+    #[error("expected a shell command, not an empty one")]
+    Empty,
+    #[error(
+        "expected a shell command of text, newlines and tabs: no carriage returns or \
+         other control characters"
+    )]
+    Control,
+}
+
+impl std::str::FromStr for SetupCommand {
+    type Err = SetupCommandError;
+
+    fn from_str(text: &str) -> Result<SetupCommand, SetupCommandError> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(SetupCommandError::Empty);
+        }
+        // YAML takes U+2028, U+2029 and U+0085 (a control) as line breaks,
+        // and U+FEFF as a byte order mark.
+        let bad = |c: char| {
+            (c.is_control() && c != '\n' && c != '\t')
+                || matches!(c, '\u{2028}' | '\u{2029}' | '\u{feff}')
+        };
+        if text.chars().any(bad) {
+            return Err(SetupCommandError::Control);
+        }
+        Ok(SetupCommand(text.to_owned()))
+    }
+}
+
 /// What the workflow is made from.
 #[derive(Debug, Clone)]
 pub struct Settings<'a> {
@@ -165,6 +285,85 @@ mod tests {
                 })
                 .collect();
             assert!(left.is_empty(), "{forge:?}: {left:?}");
+        }
+    }
+
+    #[test]
+    fn project_dirs_are_relative_and_inside_the_repository() {
+        for (given, kept) in [
+            ("vaelii", "vaelii"),
+            ("upstream/app", "upstream/app"),
+            ("./vaelii/", "vaelii"),
+            ("a//b/./c", "a/b/c"),
+            (".hidden/x-1_2", ".hidden/x-1_2"),
+            (".", ""),
+            ("./", ""),
+        ] {
+            let dir: ProjectDir = given.parse().unwrap();
+            assert_eq!(dir.as_str(), kept, "{given:?}");
+            assert_eq!(dir.is_root(), kept.is_empty(), "{given:?}");
+        }
+        assert_eq!(
+            "vaelii".parse::<ProjectDir>().unwrap().join("project.clj"),
+            "vaelii/project.clj"
+        );
+        assert_eq!(ProjectDir::default().join("project.clj"), "project.clj");
+        for (bad, why) in [
+            ("", ProjectDirError::Empty),
+            ("/vaelii", ProjectDirError::Absolute),
+            ("/", ProjectDirError::Absolute),
+            ("..", ProjectDirError::Parent),
+            ("../vaelii", ProjectDirError::Parent),
+            ("a/../b", ProjectDirError::Parent),
+            ("a/..", ProjectDirError::Parent),
+            ("a b", ProjectDirError::Chars),
+            ("a\\b", ProjectDirError::Chars),
+            ("'a'", ProjectDirError::Chars),
+            ("a*", ProjectDirError::Chars),
+            ("a\nb", ProjectDirError::Chars),
+            ("é", ProjectDirError::Chars),
+        ] {
+            assert_eq!(bad.parse::<ProjectDir>(), Err(why), "{bad:?}");
+        }
+        assert!("a".repeat(1024).parse::<ProjectDir>().is_ok());
+        assert_eq!(
+            "a".repeat(1025).parse::<ProjectDir>(),
+            Err(ProjectDirError::Chars)
+        );
+    }
+
+    #[test]
+    fn setup_commands_are_kept_as_given_but_for_outer_whitespace() {
+        for (given, kept) in [
+            ("./overlay.sh", "./overlay.sh"),
+            ("  make\n\n", "make"),
+            (
+                "a &&\n\tb # c: 'd' \"e\" ${{ f }}",
+                "a &&\n\tb # c: 'd' \"e\" ${{ f }}",
+            ),
+        ] {
+            assert_eq!(given.parse::<SetupCommand>().unwrap().as_str(), kept);
+        }
+        for bad in ["", " ", "\n\t "] {
+            assert_eq!(
+                bad.parse::<SetupCommand>(),
+                Err(SetupCommandError::Empty),
+                "{bad:?}"
+            );
+        }
+        for bad in [
+            "a\r\nb",
+            "a\u{0}b",
+            "a\u{1b}b",
+            "a\u{85}b",
+            "a\u{2028}b",
+            "\u{feff}a",
+        ] {
+            assert_eq!(
+                bad.parse::<SetupCommand>(),
+                Err(SetupCommandError::Control),
+                "{bad:?}"
+            );
         }
     }
 
