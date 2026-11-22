@@ -472,16 +472,33 @@ fn the_forgejo_header_quotes_the_capability_gate_as_the_design_says_it() {
         .expect("the design has the section");
     let gate = gate.split("\n## ").next().unwrap();
     let doc = words(&gate.replace('`', "").replace("**", ""));
-    let dir = tempfile::tempdir().unwrap();
-    assert_cmd::Command::cargo_bin("greenshift")
-        .unwrap()
-        .current_dir(dir.path())
-        .args(["init", "nextest", "--ci", "forgejo"])
-        .args(["--release", RELEASE, "--sha256", &"a".repeat(64)])
-        .assert()
-        .success();
-    let text =
-        std::fs::read_to_string(dir.path().join(".forgejo/workflows/greenshift.yml")).unwrap();
+    // `init lein` writes the same header; it needs a project and a
+    // release with `run lein`.
+    for (backend, release) in [("nextest", RELEASE), ("lein", "v0.3.0")] {
+        let dir = tempfile::tempdir().unwrap();
+        if backend == "lein" {
+            std::fs::write(
+                dir.path().join("project.clj"),
+                "(defproject demo \"0.0.0\")\n",
+            )
+            .unwrap();
+        }
+        assert_cmd::Command::cargo_bin("greenshift")
+            .unwrap()
+            .current_dir(dir.path())
+            .args(["init", backend, "--ci", "forgejo"])
+            .args(["--release", release, "--sha256", &"a".repeat(64)])
+            .assert()
+            .success();
+        let text =
+            std::fs::read_to_string(dir.path().join(".forgejo/workflows/greenshift.yml")).unwrap();
+        assert_quotes_the_gate(&text, &doc);
+    }
+}
+
+/// The quoted paragraphs of the header of `text` are whole sentences of
+/// `doc`, the capability gate's words.
+fn assert_quotes_the_gate(text: &str, doc: &str) {
     // The quoted paragraphs: the comment lines indented under "says:".
     let mut quoted = vec![String::new()];
     let mut inside = false;
