@@ -21,6 +21,12 @@
 ;; - A namespace the names file names runs even when lein did not select
 ;;   it (lein selects one only for a public test, so a group of its private
 ;;   tests alone would never run), its unnamed tests set aside meanwhile.
+;; - A namespace the names file names that lein never loaded is outside
+;;   :test-paths: before run-tests, lein loads every namespace there that
+;;   :greenshift or :only selects. greenshift does not load it, as `lein
+;;   test <ns>` would, so the run runs and writes nothing, and lists such
+;;   namespaces in a file of their own for greenshift to refuse the run;
+;;   lein exits 1.
 ;; - Every name in the names file that never ran is <skipped>: after a
 ;;   fixture error in its namespace, "not run: fixture error in <ns>", and
 ;;   otherwise "not run". A var that began but never ended (the JVM exited
@@ -234,8 +240,10 @@
 (defn install!
   "Record every test var's result and write them as JUnit to junit when
   the run ends; run the namespaces in the order the names file first
-  names them, the rest after, as given."
-  [{:keys [^String names ^String junit]}]
+  names them, the rest after, as given. When the names file names a
+  namespace lein never loaded, run nothing and write those namespaces to
+  unloaded instead, one a line."
+  [{:keys [^String names ^String junit ^String unloaded]}]
   (let [names (read-names names)
         wanted (set names)
         order (reduce (fn [m ^String n]
@@ -333,6 +341,18 @@
                (doseq [v aside]
                  (alter-meta! v #(-> % (assoc :test (::set-aside %)) (dissoc ::set-aside))))
                (write! junit names)))))))
+    ;; Outermost, so it decides before anything runs or is recorded.
+    (alter-var-root
+     #'t/run-tests
+     (fn [run-tests]
+       (fn [& namespaces]
+         (let [given (set (map ns-str namespaces))
+               outside (remove #(or (given %) (find-ns (symbol %)))
+                               (sort-by order (keys order)))]
+           (if (seq outside)
+             (do (spit unloaded (apply str (map #(str % "\n") outside)))
+                 {:type :summary :test 0 :pass 0 :fail 0 :error 1})
+             (apply run-tests namespaces))))))
     (.addShutdownHook (Runtime/getRuntime)
                       (Thread. ^Runnable (fn [] (write! junit names))))
     :installed))

@@ -504,6 +504,9 @@ greenshift run lein --commit "$(git rev-parse HEAD)"
   `:greenshift` (or `:only` and the names): lein runs a test any one
   selector matches, so a selector given to a run as well would add its
   tests to the group's.
+  A namespace given here must be under `:test-paths`: `lein test` loads
+  one from anywhere on the classpath, but greenshift does not yet, and
+  refuses the run (exit 2, nothing recorded), naming it.
 - **Reflection.** lein writes the test form to a file without metadata
   unless project.clj sets `:preserve-eval-meta true` (lein 2.10 and
   later), so with `*warn-on-reflection*` on and without that key, the
@@ -511,7 +514,8 @@ greenshift run lein --commit "$(git rev-parse HEAD)"
   it. greenshift's injected files never warn.
 
 Exit status: as for `run nextest`, lein's exit status in place of
-nextest's (lein exits 1 when any test fails).
+nextest's (lein exits 1 when any test fails), or 2 when the run is
+refused for a namespace outside `:test-paths`.
 
 ## Set up a repo
 

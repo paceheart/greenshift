@@ -9,7 +9,8 @@
 //! together as one distinct run, even when their bytes match a previous
 //! execution. `greenshift ingest` instead imports identical reports once
 //! per textual commit namespace.
-//! The exit status is that of the first invocation that failed, or 0.
+//! The exit status is that of the first invocation that failed, or 0; a
+//! run the backend refuses ([`Backend::refused`]) exits 2.
 //!
 //! Each backend lives in a module of its own, [`nextest`] and [`lein`]; this
 //! module knows nothing of any one runner.
@@ -78,6 +79,13 @@ pub trait Backend {
         tests: &[&InventoryTest],
         dir: &Path,
     ) -> anyhow::Result<Vec<Invocation>>;
+
+    /// Why the run is refused, once `invocation` has run: the runner was
+    /// asked for tests it cannot run, and ran none. A refused run runs no
+    /// more invocations and records nothing. None by default.
+    fn refused(&self, _invocation: &Invocation) -> Option<String> {
+        None
+    }
 }
 
 /// Run the whole cycle with `backend`; see the module docs.
@@ -147,7 +155,14 @@ pub(crate) fn run_with_control(
     for (class, group) in planned_groups(groups.rich(), groups.poor()) {
         invocations.extend(backend.invocations(class, group, &dir)?);
     }
-    let codes: Vec<u8> = invocations.iter().map(execute).collect();
+    let mut codes = Vec::new();
+    for invocation in &invocations {
+        codes.push(execute(invocation));
+        if let Some(why) = backend.refused(invocation) {
+            eprintln!("greenshift: {why}; nothing was recorded");
+            return Ok(ExitCode::from(2));
+        }
+    }
     if tests.is_empty() {
         eprintln!("greenshift: no tests to run, so nothing to record");
     } else {

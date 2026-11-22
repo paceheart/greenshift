@@ -585,6 +585,40 @@ fn without_the_selector_groups_run_with_only_and_record_the_same() {
 }
 
 #[test]
+fn a_namespace_the_listing_is_given_outside_the_test_paths_is_refused() {
+    let _turn = turn();
+    if !lein_ready() {
+        return;
+    }
+    let project = Project::new();
+    // `lein test scratch.in-src` runs this test, from src/, which a run's
+    // own discovery (the :test-paths) never finds: greenshift does not
+    // load it, so it must say so and record nothing, not record the test
+    // as skipped and exit 0. So with :only (no selector yet) and with the
+    // :greenshift selector.
+    std::fs::write(
+        project.root().join("src/scratch/in_src.clj"),
+        "(ns scratch.in-src (:require [clojure.test :refer :all]))\n\
+         (deftest in-src (is (= 1 2)))\n",
+    )
+    .unwrap();
+    for init in [false, true] {
+        if init {
+            project.init();
+        }
+        let out = project.run(&["--", "scratch.plain-test", "scratch.in-src"], &[]);
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "init {init}: {stderr}");
+        assert!(
+            stderr.contains("scratch.in-src is not under :test-paths"),
+            "init {init}: {stderr}"
+        );
+        assert!(!stderr.contains("scratch.plain-test is"), "{stderr}");
+        assert!(!project.db.exists() || project.runs().is_empty());
+    }
+}
+
+#[test]
 fn a_listing_that_fails_ends_the_run_with_its_status_and_records_nothing() {
     let _turn = turn();
     if !lein_ready() {

@@ -144,14 +144,43 @@ pub fn list_script(out: &Path) -> anyhow::Result<String> {
 
 /// The reporter injection for one run: it sets the property the
 /// `:greenshift` selector reads to `names`, and writes the run's JUnit
-/// to `junit`.
+/// to `junit`, or, when `names` names a namespace lein did not load,
+/// those namespaces to [`unloaded_file`] instead.
 pub fn run_script(names: &Path, junit: &Path) -> anyhow::Result<String> {
+    let unloaded = clojure_path(&unloaded_file(junit))?;
     let names = clojure_path(names)?;
     let junit = clojure_path(junit)?;
     Ok(format!(
         "{JUNIT_CLJ}\n(System/setProperty {} {names})\n\
-         (greenshift.lein.junit/install! {{:names {names} :junit {junit}}})\n",
+         (greenshift.lein.junit/install! {{:names {names} :junit {junit} :unloaded {unloaded}}})\n",
         clojure_string(crate::lein::NAMES_PROPERTY)
+    ))
+}
+
+/// Where the reporter writing `junit` lists the namespaces it was given
+/// that lein never loaded, one a line: those outside `:test-paths`.
+pub fn unloaded_file(junit: &Path) -> PathBuf {
+    junit.with_extension("unloaded")
+}
+
+/// Why a run whose reporter wrote `junit` is refused: the namespaces in
+/// its [`unloaded_file`], which `lein test <ns>` loads and greenshift
+/// does not.
+pub fn refusal(junit: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(unloaded_file(junit)).ok()?;
+    let namespaces: Vec<String> = text
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| Tainted::raw(line).to_string())
+        .collect();
+    let (list, verb) = match namespaces.as_slice() {
+        [] => return None,
+        [one] => (one.clone(), "is"),
+        many => (many.join(", "), "are"),
+    };
+    Some(format!(
+        "{list} {verb} not under :test-paths: `lein test` loads a namespace it is given \
+         from anywhere on the classpath, but greenshift does not yet"
     ))
 }
 
@@ -309,6 +338,10 @@ impl Backend for Lein {
                 })
             })
             .collect()
+    }
+
+    fn refused(&self, invocation: &Invocation) -> Option<String> {
+        refusal(&invocation.junit)
     }
 }
 

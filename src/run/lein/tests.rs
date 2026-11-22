@@ -135,7 +135,7 @@ fn one_invocation_per_class_names_exactly_its_group_in_order() {
         )));
         assert!(script.contains(&format!(
             "(greenshift.lein.junit/install! {{:names \"/scratch/{stem}.names\" \
-             :junit \"/scratch/{stem}.xml\"}})"
+             :junit \"/scratch/{stem}.xml\" :unloaded \"/scratch/{stem}.unloaded\"}})"
         )));
         assert_eq!(
             inv.args[3],
@@ -246,4 +246,33 @@ fn the_selector_comes_from_project_clj() {
     };
     std::fs::write(&clj, merged).unwrap();
     assert_eq!(Selector::for_project(&clj), (Selector::Names, None));
+}
+
+#[test]
+fn a_run_is_refused_for_the_namespaces_its_reporter_found_unloaded() {
+    let dir = tempfile::tempdir().unwrap();
+    let junit = dir.path().join("rich-1.xml");
+    assert_eq!(refusal(&junit), None, "no file: not refused");
+    let unloaded = unloaded_file(&junit);
+    assert_eq!(unloaded, dir.path().join("rich-1.unloaded"));
+    std::fs::write(&unloaded, "").unwrap();
+    assert_eq!(refusal(&junit), None, "empty: not refused");
+    std::fs::write(&unloaded, "my.in-src\n").unwrap();
+    let one = refusal(&junit).unwrap();
+    assert!(
+        one.starts_with("my.in-src is not under :test-paths"),
+        "{one}"
+    );
+    std::fs::write(&unloaded, "my.a\nmy.\u{1b}b\n").unwrap();
+    let many = refusal(&junit).unwrap();
+    assert!(
+        many.starts_with(r"my.a, my.\u{1b}b are not under :test-paths"),
+        "{many}"
+    );
+    let lein = backend(&[], Selector::Names);
+    let invocation = &lein
+        .invocations(Class::Rich, &[&test("my.a", "t")], dir.path())
+        .unwrap()[0];
+    assert_eq!(invocation.junit, junit);
+    assert_eq!(lein.refused(invocation), refusal(&junit));
 }
