@@ -168,10 +168,14 @@ impl std::str::FromStr for SetupCommand {
             return Err(SetupCommandError::Empty);
         }
         // YAML takes U+2028, U+2029 and U+0085 (a control) as line breaks,
-        // and U+FEFF as a byte order mark.
+        // and U+FEFF as a byte order mark; U+FFFE and U+FFFF are not
+        // printable characters, which YAML may not hold.
         let bad = |c: char| {
             (c.is_control() && c != '\n' && c != '\t')
-                || matches!(c, '\u{2028}' | '\u{2029}' | '\u{feff}')
+                || matches!(
+                    c,
+                    '\u{2028}' | '\u{2029}' | '\u{feff}' | '\u{fffe}' | '\u{ffff}'
+                )
         };
         if text.chars().any(bad) {
             return Err(SetupCommandError::Control);
@@ -430,6 +434,8 @@ mod tests {
             "a\u{85}b",
             "a\u{2028}b",
             "\u{feff}a",
+            "a\u{fffe}b",
+            "a\u{ffff}b",
         ] {
             assert_eq!(
                 bad.parse::<SetupCommand>(),
