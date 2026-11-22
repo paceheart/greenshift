@@ -585,33 +585,6 @@ fn without_the_selector_groups_run_with_only_and_record_the_same() {
 }
 
 #[test]
-fn a_namespace_the_listing_is_given_outside_the_test_paths_still_runs() {
-    let _turn = turn();
-    if !lein_ready() {
-        return;
-    }
-    let project = Project::new();
-    project.init();
-    // `lein test scratch.in-src` runs this test, from src/, which a run's
-    // own discovery (the :test-paths) never finds: it must still run, and
-    // fail, not be skipped.
-    std::fs::write(
-        project.root().join("src/scratch/in_src.clj"),
-        "(ns scratch.in-src (:require [clojure.test :refer :all]))\n\
-         (deftest in-src (is (= 1 2)))\n",
-    )
-    .unwrap();
-    let out = project.run(&["--", "scratch.in-src"], &[]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
-    let runs = project.runs();
-    assert_eq!(runs.len(), 1);
-    assert_eq!(
-        runs[0].results,
-        [("scratch.in-src".into(), "in-src".into(), "failed".into())]
-    );
-}
-
-#[test]
 fn a_listing_that_fails_ends_the_run_with_its_status_and_records_nothing() {
     let _turn = turn();
     if !lein_ready() {

@@ -20,9 +20,7 @@
 ;;   and errors agree with clojure.test's counts.
 ;; - A namespace the names file names runs even when lein did not select
 ;;   it (lein selects one only for a public test, so a group of its private
-;;   tests alone would never run), its unnamed tests set aside meanwhile;
-;;   one lein never loaded (outside :test-paths, named to the listing) is
-;;   loaded first.
+;;   tests alone would never run), its unnamed tests set aside meanwhile.
 ;; - Every name in the names file that never ran is <skipped>: after a
 ;;   fixture error in its namespace, "not run: fixture error in <ns>", and
 ;;   otherwise "not run". A var that began but never ended (the JVM exited
@@ -305,16 +303,7 @@
                ;; run them. Such a namespace, loaded, runs as well, with
                ;; every test the names file leaves out set aside, as lein
                ;; sets aside the tests its selectors leave out.
-               ;; A named namespace lein never loaded (one the listing
-               ;; was given that is outside :test-paths, which a run's
-               ;; own discovery never finds) is loaded here, as `lein
-               ;; test <ns>` loads it, so its tests run rather than
-               ;; being skipped.
-               extra (vec (keep #(when-not (given %)
-                                   (let [sym (symbol %)]
-                                     (or (find-ns sym)
-                                         (do (require sym) (find-ns sym)))))
-                                (keys order)))
+               extra (vec (keep #(when-not (given %) (find-ns (symbol %))) (keys order)))
                aside (vec (for [ns extra
                                 v (vals (ns-interns ns))
                                 :when (and (:test (meta v))
