@@ -190,6 +190,8 @@ pub struct Settings<'a> {
     pub java: &'a JavaVersion,
     /// Where the project is: the tests run there.
     pub project: &'a ProjectDir,
+    /// What to run before the tests, if anything.
+    pub setup: Option<&'a SetupCommand>,
 }
 
 /// Where the workflow goes for `forge`: where `init nextest` writes its.
@@ -213,17 +215,14 @@ pub fn workflow(settings: &Settings<'_>) -> String {
     };
     let install = super::nextest::indent(include_str!("nextest/install.sh"), 10);
     let project = settings.project;
-    let (again, working_directory, history_files) = if project.is_root() {
+    let (working_directory, history_files) = if project.is_root() {
         (
-            String::new(),
             String::new(),
             "            --history-cache-dir .greenshift/cache \
              --history-artifact .greenshift/publish.sqlite \\\n",
         )
     } else {
         (
-            "# Give it the same --project-dir too, or the new workflow goes without it.\n"
-                .to_owned(),
             format!("        working-directory: '{}'\n", project.as_str()),
             // greenshift's own files stay in the repository root, where
             // the cache and artifact steps and the publisher find them.
@@ -233,8 +232,26 @@ pub fn workflow(settings: &Settings<'_>) -> String {
             ),
         )
     };
+    let again = match (settings.setup.is_some(), !project.is_root()) {
+        (false, false) => "",
+        (false, true) => {
+            "# Give it the same --project-dir too, or the new workflow goes without it.\n"
+        }
+        (true, false) => "# Give it the same --setup too, or the new workflow goes without it.\n",
+        (true, true) => {
+            "# Give it the same --setup and --project-dir too, or the new workflow goes\n\
+             # without them.\n"
+        }
+    };
+    let setup = settings.setup.map_or_else(String::new, |setup| {
+        format!(
+            "      # From --setup: run in the repository root, before the tests.\n      \
+             - name: Set up the project\n        shell: bash\n        run: |\n{}",
+            super::nextest::indent(setup.as_str(), 10)
+        )
+    });
     super::forgejo_paragraphs(template)
-        .replace("@AGAIN@\n", &again)
+        .replace("@AGAIN@\n", again)
         .replace("@WORKING_DIRECTORY@\n", &working_directory)
         .replace("@HISTORY_FILES@\n", history_files)
         .replace("@PROJECT_CLJ@", &project.join(PROJECT_CLJ))
@@ -244,16 +261,28 @@ pub fn workflow(settings: &Settings<'_>) -> String {
         .replace("@RUNS_ON@", settings.runs_on.as_str())
         .replace("@JAVA@", settings.java.as_str())
         .replace("@LEIN@", LEIN_VERSION)
+        // Last, so that nothing in the command is taken for a placeholder.
+        .replace("@SETUP@\n", &setup)
 }
 
 /// What to do with `project.clj` in `project` under `root`: add the
 /// selector, nothing when it is there already, or a conflict when a
-/// different one is, unless `force`. A missing, unreadable or symlinked
-/// file, or one reached through a symlinked directory, or a computed
-/// `:test-selectors`, is an error, and then nothing is written.
-pub fn project_action(root: &Path, project: &ProjectDir, force: bool) -> anyhow::Result<Action> {
+/// different one is, unless `force`. A missing file is nothing to do
+/// (`None`) when the project is `assembled` in CI, in a directory of its
+/// own, and otherwise an error, as is an unreadable or symlinked file,
+/// one reached through a symlinked directory, or a computed
+/// `:test-selectors`; and then nothing is written.
+pub fn project_action(
+    root: &Path,
+    project: &ProjectDir,
+    assembled: bool,
+    force: bool,
+) -> anyhow::Result<Option<Action>> {
     let path = PathBuf::from(project.join(PROJECT_CLJ));
     let Some(bytes) = super::read_existing(root, &path)? else {
+        if assembled && !project.is_root() {
+            return Ok(None);
+        }
         if project.is_root() {
             anyhow::bail!(
                 "no project.clj here; run `greenshift init lein` in the root of a Leiningen \
@@ -269,7 +298,7 @@ pub fn project_action(root: &Path, project: &ProjectDir, force: bool) -> anyhow:
     let text = String::from_utf8(bytes)
         .with_context(|| format!("{} is not UTF-8; nothing written", Tainted::from(&*path)))?;
     let merged = lein::merge(&text, force).context("nothing written")?;
-    Ok(match merged {
+    Ok(Some(match merged {
         Merge::Unchanged => Action::Unchanged { path },
         Merge::Changed(content) => Action::Edit {
             path,
@@ -284,7 +313,7 @@ pub fn project_action(root: &Path, project: &ProjectDir, force: bool) -> anyhow:
             )),
             path,
         },
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -297,6 +326,7 @@ mod tests {
         let sha256: Sha256 = "a".repeat(64).parse().unwrap();
         let java = JavaVersion::default();
         let nested: ProjectDir = "upstream/app".parse().unwrap();
+        let setup: SetupCommand = "./assemble".parse().unwrap();
         for (forge, project) in [Forge::Github, Forge::Forgejo]
             .into_iter()
             .flat_map(|forge| [(forge, ProjectDir::default()), (forge, nested.clone())])
@@ -310,6 +340,7 @@ mod tests {
                 runs_on: &runs_on,
                 java: &java,
                 project,
+                setup: Some(&setup),
             });
             // Any `@NAME@` left, whether or not `workflow` knows the name.
             let parts: Vec<&str> = text.split('@').collect();

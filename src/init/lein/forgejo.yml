@@ -73,6 +73,7 @@ jobs:
         uses: https://github.com/DeLaGuardo/setup-clojure@6d46099eae24853c33c0482f2bb54edf4f1a4c74 # 13.7.0
         with:
           lein: @LEIN@
+@SETUP@
       - name: Cache Maven dependencies
         uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:

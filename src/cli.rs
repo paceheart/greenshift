@@ -173,6 +173,14 @@ pub struct InitLeinArgs {
     #[arg(long, value_name = "DIR")]
     pub project_dir: Option<crate::init::lein::ProjectDir>,
 
+    /// A shell command the workflow runs in bash, in the repository root,
+    /// as a step of its own after setting up the JDK and Leiningen and
+    /// before the tests: to assemble the project, say. With --project-dir,
+    /// DIR/project.clj may then be missing when init runs: the selector
+    /// is left for the command to add.
+    #[arg(long, value_name = "CMD", requires = "ci")]
+    pub setup: Option<crate::init::lein::SetupCommand>,
+
     /// Replace a :greenshift selector or a workflow that exists and differs.
     #[arg(long)]
     pub force: bool,
@@ -672,7 +680,17 @@ pub fn init_lein(args: &InitLeinArgs, root: &std::path::Path) -> anyhow::Result<
         }
     };
     let project = args.project_dir.clone().unwrap_or_default();
-    let mut actions = vec![init::lein::project_action(root, &project, args.force)?];
+    let assembled = args.setup.is_some();
+    let mut actions = Vec::new();
+    match init::lein::project_action(root, &project, assembled, args.force)? {
+        Some(action) => actions.push(action),
+        None => println!(
+            "greenshift: note: no {} here, so the :greenshift test selector is not added; \
+             unless --setup adds it, `greenshift run lein` runs each group as \
+             `lein test :only ns/var ...`",
+            crate::tainted::Tainted::from(std::path::Path::new(&project.join("project.clj")))
+        ),
+    }
     if let Some((forge, release, sha256)) = workflow {
         if forge == Forge::Forgejo {
             forgejo_notes(root);
@@ -689,6 +707,7 @@ pub fn init_lein(args: &InitLeinArgs, root: &std::path::Path) -> anyhow::Result<
             runs_on: &runs_on,
             java: &java,
             project: &project,
+            setup: args.setup.as_ref(),
         };
         actions.extend(init::decide(
             root,
