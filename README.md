@@ -627,9 +627,11 @@ and commit what it changes:
   `docker` on Forgejo). On Forgejo the workflow is **not isolated**, as
   for `init nextest` (see **Set up a repo**): the file says so at the
   top, and `init` says so when it runs, and also when writing
-  `.forgejo/workflows` would stop other workflows running. Its JDK and
-  Leiningen steps are fetched from github.com, so the runner needs to
-  reach it.
+  `.forgejo/workflows` would stop other workflows running. Its JDK step
+  is an action fetched from github.com, and Leiningen's script is
+  downloaded from raw.githubusercontent.com and checked against its
+  pinned SHA-256 (the setup-clojure action answers HTTP 404 on Forgejo
+  runners), so the runner needs to reach both.
 - **`--project-dir DIR`**, for a project that is not at the repository's
   root: a relative path inside the repository (no `..` parts, not
   absolute; `.` is the root). `init` edits `DIR/project.clj`, and the
