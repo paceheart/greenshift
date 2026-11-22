@@ -271,7 +271,9 @@ fn custom_backend_keeps_list_invocation_and_empty_execution_contract() {
         else {
             panic!("run command");
         };
-        let BackendCommand::Nextest(args) = args.backend;
+        let BackendCommand::Nextest(args) = args.backend else {
+            panic!("not nextest");
+        };
         let custom = Custom {
             tests: Inventory::new(if empty {
                 vec![]

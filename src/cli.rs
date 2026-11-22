@@ -132,6 +132,42 @@ pub struct InitArgs {
 pub enum InitBackend {
     /// Set up `greenshift run nextest`, with cargo-nextest.
     Nextest(InitNextestArgs),
+    /// Set up `greenshift run lein`, with Leiningen: add the :greenshift
+    /// test selector to project.clj, and with --ci, write a workflow.
+    Lein(InitLeinArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct InitLeinArgs {
+    /// Also write a GitHub workflow, .github/workflows/greenshift.yml,
+    /// that runs `greenshift run lein` with durable history. Only GitHub
+    /// is supported for now.
+    #[arg(long, value_enum, value_name = "FORGE", num_args = 0..=1,
+          default_missing_value = "github")]
+    pub ci: Option<crate::init::Forge>,
+
+    /// The greenshift release the workflow installs, such as v0.3.0; with
+    /// --ci, required. It needs `run lein`.
+    #[arg(long, value_name = "TAG", requires = "ci")]
+    pub release: Option<crate::init::Release>,
+
+    /// The release binary's SHA-256, from the release's .sha256 file,
+    /// checked independently; with --ci, required.
+    #[arg(long, value_name = "HEX", requires = "ci")]
+    pub sha256: Option<crate::init::Sha256>,
+
+    /// The runner label the jobs run on, an x86_64 Linux runner.
+    /// Default: ubuntu-latest.
+    #[arg(long, value_name = "LABEL", requires = "ci")]
+    pub runs_on: Option<crate::init::RunnerLabel>,
+
+    /// The JDK the workflow sets up (Temurin). Default: 25.
+    #[arg(long, value_name = "VERSION", requires = "ci")]
+    pub java_version: Option<crate::init::lein::JavaVersion>,
+
+    /// Replace a :greenshift selector or a workflow that exists and differs.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -219,6 +255,8 @@ pub struct RunArgs {
 pub enum Backend {
     /// Run the tests with cargo-nextest.
     Nextest(NextestRunArgs),
+    /// Run the tests with Leiningen (`lein test`).
+    Lein(LeinRunArgs),
 }
 
 /// What `run` takes whatever the test runner.
@@ -276,6 +314,30 @@ pub struct NextestRunArgs {
     /// Arguments for `cargo nextest run` and, where it takes them,
     /// `cargo nextest list`.
     #[arg(last = true, value_name = "NEXTEST_ARGS")]
+    pub args: Vec<std::ffi::OsString>,
+}
+
+#[derive(Debug, Args)]
+#[command(mut_arg("source", |source| {
+    source
+        .action(clap::ArgAction::Set)
+        .default_value("lein")
+        .help("Read only runs from this source, and record the run as from it")
+}))]
+pub struct LeinRunArgs {
+    #[command(flatten)]
+    pub options: RunOptions,
+
+    /// The most bytes of test names to give one `lein test :only`, when
+    /// project.clj has no :greenshift selector; more are split over
+    /// several runs.
+    #[arg(long, value_name = "BYTES", default_value_t = run::lein::MAX_ONLY_BYTES,
+          value_parser = clap::value_parser!(usize))]
+    pub max_only_bytes: usize,
+
+    /// Arguments for the listing's `lein test`: selectors and namespaces,
+    /// as `lein test` takes them. The runs get only greenshift's own.
+    #[arg(last = true, value_name = "LEIN_TEST_ARGS")]
     pub args: Vec<std::ffi::OsString>,
 }
 
@@ -517,10 +579,12 @@ pub fn run_with_control(control: &TransportControl) -> anyhow::Result<ExitCode> 
         Command::Plan(args) => plan(&args),
         Command::Run(args) => match args.backend {
             Backend::Nextest(args) => run_nextest_with_control(&args, control),
+            Backend::Lein(args) => run_lein_with_control(&args, control),
         },
         Command::History(args) => history(&args, control),
         Command::Init(args) => match args.backend {
             InitBackend::Nextest(args) => init_nextest(&args, std::path::Path::new(".")),
+            InitBackend::Lein(args) => init_lein(&args, std::path::Path::new(".")),
         },
     }
 }
@@ -568,6 +632,58 @@ pub fn init_nextest(args: &InitNextestArgs, root: &std::path::Path) -> anyhow::R
     };
     let wants = init::nextest::wants(&settings);
     let actions = init::decide(root, wants, args.force)?;
+    init::apply(root, &actions)
+}
+
+/// Set the Leiningen project at `root` up for `greenshift run lein`; see
+/// [`crate::init::lein`].
+pub fn init_lein(args: &InitLeinArgs, root: &std::path::Path) -> anyhow::Result<ExitCode> {
+    use crate::init::{self, Forge};
+    let workflow = match (args.ci, &args.release, &args.sha256) {
+        (None, ..) => None,
+        (Some(Forge::Forgejo), ..) => {
+            eprintln!(
+                "greenshift: usage error: init lein writes a GitHub workflow only, for now; \
+                 use --ci github"
+            );
+            return Ok(ExitCode::from(2));
+        }
+        (Some(Forge::Github), Some(release), _)
+            if release.version() <= init::LAST_RELEASE_WITHOUT_LEIN =>
+        {
+            let (major, minor, patch) = init::LAST_RELEASE_WITHOUT_LEIN;
+            eprintln!(
+                "greenshift: usage error: --release {}: v{major}.{minor}.{patch} and earlier \
+                 have no `run lein`; pin a later release",
+                release.as_str()
+            );
+            return Ok(ExitCode::from(2));
+        }
+        (Some(Forge::Github), Some(release), Some(sha256)) => Some((release, sha256)),
+        (Some(Forge::Github), ..) => {
+            eprintln!("greenshift: usage error: --ci needs --release and --sha256");
+            return Ok(ExitCode::from(2));
+        }
+    };
+    let mut actions = vec![init::lein::project_action(root, args.force)?];
+    if let Some((release, sha256)) = workflow {
+        let runs_on = args
+            .runs_on
+            .clone()
+            .unwrap_or_else(|| Forge::Github.default_runner());
+        let java = args.java_version.clone().unwrap_or_default();
+        let settings = init::lein::Settings {
+            release,
+            sha256,
+            runs_on: &runs_on,
+            java: &java,
+        };
+        actions.extend(init::decide(
+            root,
+            init::lein::wants(&settings),
+            args.force,
+        )?);
+    }
     init::apply(root, &actions)
 }
 
@@ -975,6 +1091,23 @@ fn run_nextest_with_control(
         std::env::var_os("NEXTEST_PROFILE").as_deref(),
         args.max_filterset_bytes,
     )?;
+    run::run_with_control(&backend, &args.options, control)
+}
+
+/// Run the whole cycle with Leiningen; see [`run`] and [`run::lein`].
+pub fn run_lein(args: &LeinRunArgs) -> anyhow::Result<ExitCode> {
+    run_lein_with_control(args, &TransportControl::default())
+}
+
+fn run_lein_with_control(
+    args: &LeinRunArgs,
+    control: &TransportControl,
+) -> anyhow::Result<ExitCode> {
+    let (selector, note) = run::lein::Selector::for_project(std::path::Path::new("project.clj"));
+    if let Some(note) = note {
+        eprintln!("greenshift: {note}");
+    }
+    let backend = run::lein::Lein::new(args.args.clone(), selector, args.max_only_bytes);
     run::run_with_control(&backend, &args.options, control)
 }
 

@@ -57,7 +57,9 @@ fn options(args: &[&str]) -> RunOptions {
     let Command::Run(run) = parse(argv).unwrap().command else {
         panic!("not run");
     };
-    let BackendCommand::Nextest(args) = run.backend;
+    let BackendCommand::Nextest(args) = run.backend else {
+        panic!("not nextest");
+    };
     args.options
 }
 
@@ -151,7 +153,9 @@ fn run_takes_options_and_arguments_after_a_separator() {
     let Command::Run(run) = parse(argv).unwrap().command else {
         panic!("not run");
     };
-    let BackendCommand::Nextest(args) = run.backend;
+    let BackendCommand::Nextest(args) = run.backend else {
+        panic!("not nextest");
+    };
     assert_eq!(args.options.select.db, PathBuf::from("h.sqlite"));
     assert_eq!(
         args.options.commit.as_ref().map(|c| c.as_str()),
@@ -163,7 +167,7 @@ fn run_takes_options_and_arguments_after_a_separator() {
     // Arguments for nextest come after `--`, and a backend is named.
     assert!(parse(["greenshift", "run", "nextest", "--no-fail-fast"]).is_err());
     assert!(parse(["greenshift", "run"]).is_err());
-    assert!(parse(["greenshift", "run", "lein"]).is_err());
+    assert!(parse(["greenshift", "run", "kaocha"]).is_err());
     assert!(parse(["greenshift", "run", "nextest", "--branch", ""]).is_err());
     assert!(parse(["greenshift", "run", "nextest", "--tag", ""]).is_err());
     let both = ["--branch", "main", "--tag", "v1"];

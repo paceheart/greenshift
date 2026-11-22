@@ -59,7 +59,7 @@ fn fill(template: &str, settings: &Settings<'_>) -> String {
 }
 
 /// Every line of `text` indented by `by` spaces.
-fn indent(text: &str, by: usize) -> String {
+pub(super) fn indent(text: &str, by: usize) -> String {
     let pad = " ".repeat(by);
     text.lines()
         .map(|line| {
