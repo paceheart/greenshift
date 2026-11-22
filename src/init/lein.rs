@@ -188,6 +188,8 @@ pub struct Settings<'a> {
     pub sha256: &'a Sha256,
     pub runs_on: &'a RunnerLabel,
     pub java: &'a JavaVersion,
+    /// Where the project is: the tests run there.
+    pub project: &'a ProjectDir,
 }
 
 /// Where the workflow goes for `forge`: where `init nextest` writes its.
@@ -210,7 +212,32 @@ pub fn workflow(settings: &Settings<'_>) -> String {
         Forge::Forgejo => include_str!("lein/forgejo.yml"),
     };
     let install = super::nextest::indent(include_str!("nextest/install.sh"), 10);
+    let project = settings.project;
+    let (again, working_directory, history_files) = if project.is_root() {
+        (
+            String::new(),
+            String::new(),
+            "            --history-cache-dir .greenshift/cache \
+             --history-artifact .greenshift/publish.sqlite \\\n",
+        )
+    } else {
+        (
+            "# Give it the same --project-dir too, or the new workflow goes without it.\n"
+                .to_owned(),
+            format!("        working-directory: '{}'\n", project.as_str()),
+            // greenshift's own files stay in the repository root, where
+            // the cache and artifact steps and the publisher find them.
+            concat!(
+                "            --history-cache-dir \"$GITHUB_WORKSPACE/.greenshift/cache\" \\\n",
+                "            --history-artifact \"$GITHUB_WORKSPACE/.greenshift/publish.sqlite\" \\\n",
+            ),
+        )
+    };
     super::forgejo_paragraphs(template)
+        .replace("@AGAIN@\n", &again)
+        .replace("@WORKING_DIRECTORY@\n", &working_directory)
+        .replace("@HISTORY_FILES@\n", history_files)
+        .replace("@PROJECT_CLJ@", &project.join(PROJECT_CLJ))
         .replace("@INSTALL@\n", &install)
         .replace("@RELEASE@", settings.release.as_str())
         .replace("@SHA256@", settings.sha256.as_str())
@@ -219,16 +246,24 @@ pub fn workflow(settings: &Settings<'_>) -> String {
         .replace("@LEIN@", LEIN_VERSION)
 }
 
-/// What to do with `project.clj` under `root`: add the selector, nothing
-/// when it is there already, or a conflict when a different one is,
-/// unless `force`. A missing, unreadable or symlinked file, or a computed
+/// What to do with `project.clj` in `project` under `root`: add the
+/// selector, nothing when it is there already, or a conflict when a
+/// different one is, unless `force`. A missing, unreadable or symlinked
+/// file, or one reached through a symlinked directory, or a computed
 /// `:test-selectors`, is an error, and then nothing is written.
-pub fn project_action(root: &Path, force: bool) -> anyhow::Result<Action> {
-    let path = PathBuf::from(PROJECT_CLJ);
+pub fn project_action(root: &Path, project: &ProjectDir, force: bool) -> anyhow::Result<Action> {
+    let path = PathBuf::from(project.join(PROJECT_CLJ));
     let Some(bytes) = super::read_existing(root, &path)? else {
+        if project.is_root() {
+            anyhow::bail!(
+                "no project.clj here; run `greenshift init lein` in the root of a Leiningen \
+                 project. Nothing written"
+            );
+        }
         anyhow::bail!(
-            "no project.clj here; run `greenshift init lein` in the root of a Leiningen \
-             project. Nothing written"
+            "no {} here; give --project-dir the Leiningen project's directory, relative to \
+             the repository root, and run `greenshift init lein` in that root. Nothing written",
+            Tainted::from(&*path)
         );
     };
     let text = String::from_utf8(bytes)
@@ -242,12 +277,12 @@ pub fn project_action(root: &Path, force: bool) -> anyhow::Result<Action> {
             what: "the :greenshift test selector".to_owned(),
         },
         Merge::Conflict => Action::Conflict {
+            why: Some(format!(
+                "{} has a :greenshift test selector that differs from what init writes; \
+                 left alone (--force replaces it)",
+                Tainted::from(&*path)
+            )),
             path,
-            why: Some(
-                "project.clj has a :greenshift test selector that differs from what init \
-                 writes; left alone (--force replaces it)"
-                    .to_owned(),
-            ),
         },
     })
 }
@@ -261,7 +296,12 @@ mod tests {
         let release: Release = "v0.3.0".parse().unwrap();
         let sha256: Sha256 = "a".repeat(64).parse().unwrap();
         let java = JavaVersion::default();
-        for forge in [Forge::Github, Forge::Forgejo] {
+        let nested: ProjectDir = "upstream/app".parse().unwrap();
+        for (forge, project) in [Forge::Github, Forge::Forgejo]
+            .into_iter()
+            .flat_map(|forge| [(forge, ProjectDir::default()), (forge, nested.clone())])
+        {
+            let project = &project;
             let runs_on = forge.default_runner();
             let text = workflow(&Settings {
                 forge,
@@ -269,6 +309,7 @@ mod tests {
                 sha256: &sha256,
                 runs_on: &runs_on,
                 java: &java,
+                project,
             });
             // Any `@NAME@` left, whether or not `workflow` knows the name.
             let parts: Vec<&str> = text.split('@').collect();

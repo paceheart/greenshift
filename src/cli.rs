@@ -166,6 +166,13 @@ pub struct InitLeinArgs {
     #[arg(long, value_name = "VERSION", requires = "ci")]
     pub java_version: Option<crate::init::lein::JavaVersion>,
 
+    /// The Leiningen project's directory, relative to the repository
+    /// root, where init is run: its project.clj gets the selector, and
+    /// the workflow runs `greenshift run lein` there and keys the Maven
+    /// cache on its project.clj. Default: the root.
+    #[arg(long, value_name = "DIR")]
+    pub project_dir: Option<crate::init::lein::ProjectDir>,
+
     /// Replace a :greenshift selector or a workflow that exists and differs.
     #[arg(long)]
     pub force: bool,
@@ -664,7 +671,8 @@ pub fn init_lein(args: &InitLeinArgs, root: &std::path::Path) -> anyhow::Result<
             return Ok(ExitCode::from(2));
         }
     };
-    let mut actions = vec![init::lein::project_action(root, args.force)?];
+    let project = args.project_dir.clone().unwrap_or_default();
+    let mut actions = vec![init::lein::project_action(root, &project, args.force)?];
     if let Some((forge, release, sha256)) = workflow {
         if forge == Forge::Forgejo {
             forgejo_notes(root);
@@ -680,6 +688,7 @@ pub fn init_lein(args: &InitLeinArgs, root: &std::path::Path) -> anyhow::Result<
             sha256,
             runs_on: &runs_on,
             java: &java,
+            project: &project,
         };
         actions.extend(init::decide(
             root,
