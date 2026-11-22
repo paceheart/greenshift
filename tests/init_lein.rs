@@ -68,22 +68,21 @@ fn assert_golden(written: &str, name: &str) {
     );
 }
 
-/// The YAML file at `path` as JSON, or `None` without yq.
-fn yaml(path: &Path) -> Option<serde_json::Value> {
-    let Ok(out) = std::process::Command::new("yq")
+/// The YAML file at `path` as JSON, by mikefarah's yq v4, which the
+/// other workflow tests need too: without it the test fails rather than
+/// passing having checked nothing.
+fn yaml(path: &Path) -> serde_json::Value {
+    let out = std::process::Command::new("yq")
         .args(["-o=json", "."])
         .arg(path)
         .output()
-    else {
-        eprintln!("skipped: no yq");
-        return None;
-    };
+        .expect("mikefarah yq installed as for cache_guard tests");
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    Some(serde_json::from_slice(&out.stdout).unwrap())
+    serde_json::from_slice(&out.stdout).unwrap()
 }
 
 fn project(text: &str) -> tempfile::TempDir {
@@ -325,9 +324,7 @@ fn a_conflicting_workflow_means_project_clj_is_not_written_either() {
 fn the_workflow_is_yaml_with_the_two_job_shape() {
     let dir = project(VAELII);
     init(dir.path(), &ci_args()).assert().success();
-    let Some(workflow) = yaml(&dir.path().join(WORKFLOW)) else {
-        return;
-    };
+    let workflow = yaml(&dir.path().join(WORKFLOW));
     assert_two_jobs(&workflow);
     assert_eq!(workflow["jobs"]["test"]["permissions"]["contents"], "read");
     assert_eq!(
@@ -413,9 +410,7 @@ fn forgejo_writes_the_golden_workflow_and_says_it_is_not_isolated() {
 fn forgejo_names_every_action_by_url_and_claims_no_permissions() {
     let dir = project(VAELII);
     init(dir.path(), &forgejo_args()).assert().success();
-    let Some(workflow) = yaml(&dir.path().join(FORGEJO_WORKFLOW)) else {
-        return;
-    };
+    let workflow = yaml(&dir.path().join(FORGEJO_WORKFLOW));
     assert_two_jobs(&workflow);
     assert!(workflow["permissions"].is_null());
     let mut seen = Vec::new();
@@ -503,9 +498,7 @@ fn the_forgejo_workflow_is_the_github_one_but_for_what_forgejo_needs() {
         } else {
             WORKFLOW
         };
-        let Some(workflow) = yaml(&dir.path().join(path)) else {
-            return;
-        };
+        let workflow = yaml(&dir.path().join(path));
         workflows.push(workflow);
     }
     let (github, forgejo) = (&workflows[0], &workflows[1]);
