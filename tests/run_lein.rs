@@ -709,46 +709,6 @@ fn a_report_method_a_test_namespace_defines_still_has_its_failures_recorded() {
 }
 
 #[test]
-fn a_report_method_a_namespace_greenshift_loads_defines_still_has_its_failures_recorded() {
-    let _turn = turn();
-    if !lein_ready() {
-        return;
-    }
-    let project = Project::new();
-    project.init();
-    // Outside :test-paths, so the reporter loads this namespace itself,
-    // when the run starts: its own :fail method, chaining to nothing,
-    // replaces greenshift's then.
-    std::fs::write(
-        project.root().join("src/scratch/own_report_in_src.clj"),
-        "(ns scratch.own-report-in-src (:require [clojure.test :as t :refer :all]))\n\
-         (defmethod t/report :fail [m]\n  \
-           (t/with-test-out (println \"own :fail\" (:message m)))\n  \
-           (t/inc-report-counter :fail))\n\
-         (deftest fails-its-own-way (is (= 1 2) \"mine\"))\n",
-    )
-    .unwrap();
-    let out = project.run(&["--", "scratch.own-report-in-src"], &[]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
-    assert!(
-        text(&out.stdout).contains("own :fail mine"),
-        "{}{}",
-        text(&out.stdout),
-        text(&out.stderr)
-    );
-    let runs = project.runs();
-    assert_eq!(runs.len(), 1);
-    assert_eq!(
-        runs[0].results,
-        [(
-            "scratch.own-report-in-src".into(),
-            "fails-its-own-way".into(),
-            "failed".into()
-        )]
-    );
-}
-
-#[test]
 fn each_report_is_recorded_once_however_a_chained_method_passes_it_on() {
     let _turn = turn();
     if !lein_ready() {

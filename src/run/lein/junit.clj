@@ -233,18 +233,6 @@
     (when-not (identical? f (.getMethod ^clojure.lang.MultiFn mf k))
       (hook! mf ours k wrap))))
 
-(defn- require-unhooked!
-  "Load the namespace sym as lein loads a test namespace: before lein hooks
-  #'t/report, so with the multimethod mf (when it is one) as the var's
-  root, and a defmethod in sym finds it; the hooked root comes back after."
-  [mf sym]
-  (if (instance? clojure.lang.MultiFn mf)
-    (let [hooked @#'t/report]
-      (alter-var-root #'t/report (constantly mf))
-      (try (require sym)
-           (finally (alter-var-root #'t/report (constantly hooked)))))
-    (require sym)))
-
 (defn install!
   "Record every test var's result and write them as JUnit to junit when
   the run ends; run the namespaces in the order the names file first
@@ -309,6 +297,7 @@
      #'t/run-tests
      (fn [run-tests]
        (fn [& namespaces]
+         (rehook! mf ours)
          (let [given (set (map ns-str namespaces))
                ;; lein selects a namespace only when a public var matches,
                ;; so a group naming only private tests of a namespace (its
@@ -320,14 +309,12 @@
                ;; was given that is outside :test-paths, which a run's
                ;; own discovery never finds) is loaded here, as `lein
                ;; test <ns>` loads it, so its tests run rather than
-               ;; being skipped. Its own report methods are hooked
-               ;; below with every other namespace's.
+               ;; being skipped.
                extra (vec (keep #(when-not (given %)
                                    (let [sym (symbol %)]
                                      (or (find-ns sym)
-                                         (do (require-unhooked! mf sym) (find-ns sym)))))
+                                         (do (require sym) (find-ns sym)))))
                                 (keys order)))
-               _ (rehook! mf ours)
                aside (vec (for [ns extra
                                 v (vals (ns-interns ns))
                                 :when (and (:test (meta v))
