@@ -1261,13 +1261,13 @@ fn the_test_step_passes_each_line_of_the_file_as_one_argument() {
         ),
     ] {
         for workflow in &both_forges(extra, repo) {
-            // Three arguments, a blank line between, and no newline at the
-            // end.
+            // Three arguments, blank lines between (one empty, one only
+            // whitespace), and no newline at the end.
             let ran = run_test_step(
                 workflow,
                 &[(
                     "ci/args",
-                    b":integration\n\nvaelii.core-test\n:only vaelii.x/y",
+                    b":integration\n\nvaelii.core-test\n \t \n:only vaelii.x/y",
                 )],
             );
             assert!(ran.ok, "{}", ran.stdout);
@@ -1317,6 +1317,7 @@ fn a_missing_or_empty_arguments_file_fails_the_test_step() {
                 (&[("ci/args/x", &b"a\n"[..])][..], "is missing"),
                 (&[("ci/args", &b""[..])][..], "has no arguments"),
                 (&[("ci/args", &b"\n\n\n"[..])][..], "has no arguments"),
+                (&[("ci/args", &b"  \n\t\n \t "[..])][..], "has no arguments"),
                 (&[("ci/args", &b"a\r\nb\r\n"[..])][..], "carriage return"),
                 (&[("ci/args", &b"a\0b\n"[..])][..], "NUL"),
             ] {
