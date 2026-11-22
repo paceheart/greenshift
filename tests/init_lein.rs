@@ -394,7 +394,7 @@ fn forgejo_writes_the_golden_workflow_and_says_it_is_not_isolated() {
     );
     assert!(written.contains("run lein --history-remote"));
     assert!(written.contains("java-version: '25'"));
-    assert!(written.contains("lein: 2.12.0"));
+    assert!(written.contains("lein_version=2.12.0"));
     assert_eq!(written.matches("runs-on: 'docker'").count(), 2);
     for name in [
         "RELEASE",
@@ -403,6 +403,7 @@ fn forgejo_writes_the_golden_workflow_and_says_it_is_not_isolated() {
         "INSTALL",
         "JAVA",
         "LEIN",
+        "LEIN_SHA256",
         "NOT_ISOLATED",
         "FORGEJO_ACTIONS",
     ] {
@@ -433,7 +434,7 @@ fn forgejo_names_every_action_by_url_and_claims_no_permissions() {
             }
         }
     }
-    for action in ["setup-java", "setup-clojure", "actions/cache"] {
+    for action in ["setup-java", "actions/cache"] {
         assert!(seen.iter().any(|uses| uses.contains(action)), "{seen:?}");
     }
 }
@@ -551,6 +552,15 @@ fn assert_forges_agree(extra: &[&str], repo: impl Fn() -> tempfile::TempDir) {
         for (github, forgejo) in github.iter().zip(forgejo) {
             let (mut github_step, forgejo_step) =
                 (without(github, &["uses"]), without(forgejo, &["uses"]));
+            if forgejo["name"] == "Set up Leiningen" {
+                // The setup-clojure action on GitHub; a direct install,
+                // pinned by checksum, on Forgejo.
+                assert_eq!(github["name"], forgejo["name"]);
+                assert!(github["uses"].as_str().unwrap().contains("setup-clojure"));
+                assert!(forgejo["uses"].is_null());
+                assert_eq!(forgejo["shell"], "bash");
+                continue;
+            }
             let (Some(github), Some(forgejo)) = (github["uses"].as_str(), forgejo["uses"].as_str())
             else {
                 assert!(github["uses"].is_null() && forgejo["uses"].is_null());
@@ -1344,5 +1354,224 @@ fn without_test_args_file_the_test_step_passes_no_lein_arguments() {
         let argv = ran.argv.unwrap();
         assert!(!argv.contains(&"--".to_owned()), "{argv:?}");
         assert_eq!(argv.last().unwrap(), &"f".repeat(40));
+    }
+}
+
+/// The sha256 of Leiningen 2.12.0's `bin/lein`, which the Forgejo
+/// workflow pins.
+const LEIN_SHA256: &str = "f8e1266c0c78c08bd4af6e111889ecc316c9dd56d1e8645bbee6c1703d351bc3";
+const LEIN_URL: &str = "https://raw.githubusercontent.com/technomancy/leiningen/2.12.0/bin/lein";
+
+#[test]
+fn forgejo_installs_lein_itself_and_github_still_uses_setup_clojure() {
+    let [github, forgejo] = both_forges(&[], || project(VAELII));
+    let (github, forgejo) = (
+        serde_json::to_string(&github).unwrap(),
+        serde_json::to_string(&forgejo).unwrap(),
+    );
+    assert!(github.contains("setup-clojure"), "{github}");
+    assert!(!forgejo.contains("setup-clojure"), "{forgejo}");
+    // Nor in a comment, which the JSON leaves out.
+    let dir = project(VAELII);
+    init(dir.path(), &forgejo_args()).assert().success();
+    let written = read(dir.path(), FORGEJO_WORKFLOW);
+    assert!(!written.contains("setup-clojure"), "{written}");
+}
+
+/// What the Forgejo workflow's "Set up Leiningen" step does, run in bash
+/// as the forge runs it, with `script` for its `run`, and a stub `curl`
+/// first on PATH that records its arguments and writes `download` where
+/// it is told to: nothing is fetched.
+struct LeinStep {
+    ok: bool,
+    stdout: String,
+    /// The stub curl's arguments, if it ran.
+    curl: Option<Vec<String>>,
+    /// What the step appended to `$GITHUB_PATH`.
+    github_path: String,
+    /// Every file left under `$RUNNER_TEMP`, with its content.
+    temp: Vec<(PathBuf, Vec<u8>)>,
+    runner_temp: PathBuf,
+    _scratch: tempfile::TempDir,
+}
+
+fn lein_step_script(workflow: &serde_json::Value) -> String {
+    let lein = step(workflow, "test", "Set up Leiningen");
+    assert_eq!(lein["shell"], "bash");
+    assert!(lein["uses"].is_null(), "{lein}");
+    lein["run"].as_str().unwrap().to_owned()
+}
+
+fn run_lein_step(script: &str, download: &[u8]) -> LeinStep {
+    let scratch = tempfile::tempdir().unwrap();
+    let bin = scratch.path().join("bin");
+    let temp = scratch.path().join("runner-temp");
+    std::fs::create_dir(&bin).unwrap();
+    std::fs::create_dir(&temp).unwrap();
+    let download_file = scratch.path().join("download");
+    std::fs::write(&download_file, download).unwrap();
+    let curl_argv = scratch.path().join("curl-argv");
+    let github_path = scratch.path().join("github-path");
+    std::fs::write(&github_path, "").unwrap();
+    let curl = bin.join("curl");
+    std::fs::write(
+        &curl,
+        concat!(
+            "#!/usr/bin/env bash\n",
+            "printf '%s\\0' \"$@\" > \"$STUB_CURL_ARGV\"\n",
+            "while (($#)); do\n",
+            "  if [[ $1 == --output || $1 == -o ]]; then cp \"$STUB_CURL_DOWNLOAD\" \"$2\"; exit 0; fi\n",
+            "  shift\n",
+            "done\n",
+            "echo 'stub curl: no --output' >&2; exit 2\n",
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = std::process::Command::new("bash")
+        .args(["--noprofile", "--norc", "-eo", "pipefail", "-c", script])
+        .current_dir(scratch.path())
+        .env("PATH", path)
+        .env("RUNNER_TEMP", &temp)
+        .env("GITHUB_PATH", &github_path)
+        .env("STUB_CURL_ARGV", &curl_argv)
+        .env("STUB_CURL_DOWNLOAD", &download_file)
+        .output()
+        .unwrap();
+    let curl = std::fs::read(&curl_argv).ok().map(|bytes| {
+        let mut argv: Vec<String> = bytes
+            .split(|b| *b == 0)
+            .map(|arg| String::from_utf8(arg.to_vec()).unwrap())
+            .collect();
+        assert_eq!(argv.pop().as_deref(), Some(""));
+        argv
+    });
+    LeinStep {
+        ok: output.status.success(),
+        stdout: format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+        curl,
+        github_path: std::fs::read_to_string(&github_path).unwrap(),
+        temp: snapshot(&temp),
+        runner_temp: temp,
+        _scratch: scratch,
+    }
+}
+
+fn forgejo_lein_scripts() -> Vec<String> {
+    // The plain workflow and vaelii-lacuna's overlay shape.
+    let plain = project(VAELII);
+    init(plain.path(), &forgejo_args()).assert().success();
+    let overlay = tempfile::tempdir().unwrap();
+    std::fs::write(overlay.path().join("overlay.sh"), "#!/bin/sh\n").unwrap();
+    init(
+        overlay.path(),
+        &[
+            &forgejo_args()[..],
+            &["--setup", "./overlay.sh", "--project-dir", "vaelii"],
+        ]
+        .concat(),
+    )
+    .assert()
+    .success();
+    [plain, overlay]
+        .iter()
+        .map(|dir| lein_step_script(&yaml(&dir.path().join(FORGEJO_WORKFLOW))))
+        .collect()
+}
+
+#[test]
+fn the_lein_step_pins_exactly_the_real_lein_by_url_and_checksum() {
+    for script in forgejo_lein_scripts() {
+        assert_eq!(script.matches(LEIN_SHA256).count(), 1, "{script}");
+        assert!(script.contains("sha256sum --check --strict"), "{script}");
+        assert!(script.starts_with("set -euo pipefail\n"), "{script}");
+        // The stub sees the URL and flags the step gives curl.
+        let ran = run_lein_step(&script, b"not lein\n");
+        let curl = ran.curl.unwrap();
+        assert!(curl.contains(&LEIN_URL.to_owned()), "{curl:?}");
+        let joined = curl.join(" ");
+        for flag in [
+            "--fail",
+            "--location",
+            "--retry 3",
+            "--proto =https",
+            "--proto-redir =https",
+            "--tlsv1.2",
+        ] {
+            assert!(joined.contains(flag), "{flag}: {joined}");
+        }
+    }
+}
+
+#[test]
+fn a_lein_download_not_matching_the_pin_fails_closed() {
+    for script in forgejo_lein_scripts() {
+        for download in [&b"#!/bin/sh\necho tampered\n"[..], b""] {
+            let ran = run_lein_step(&script, download);
+            assert!(!ran.ok, "{}", ran.stdout);
+            assert!(ran.curl.is_some(), "the stub was not used: {}", ran.stdout);
+            assert!(
+                ran.stdout
+                    .contains("::error::Leiningen 2.12.0 does not match its pinned SHA-256"),
+                "{}",
+                ran.stdout
+            );
+            // Nothing installed, nothing left behind, nothing on PATH.
+            assert!(ran.temp.is_empty(), "{:?}", ran.temp);
+            assert_eq!(ran.github_path, "");
+            assert!(!ran.stdout.contains("tampered"), "{}", ran.stdout);
+        }
+    }
+}
+
+#[test]
+fn a_lein_download_matching_the_pin_is_installed_on_the_path_and_run() {
+    use sha2::{Digest, Sha256};
+    // The real lein is not fetched: the step's pin is swapped for the
+    // checksum of a stand-in, so that this shows the checksum is the
+    // only gate and what happens once it passes.
+    let stand_in = b"#!/usr/bin/env bash\necho \"stand-in lein $*\"\n";
+    let sha256: String = Sha256::digest(stand_in)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    for script in forgejo_lein_scripts() {
+        let script = script.replacen(LEIN_SHA256, &sha256, 1);
+        let ran = run_lein_step(&script, stand_in);
+        assert!(ran.ok, "{}", ran.stdout);
+        let dir = ran.runner_temp.join("lein-bin");
+        assert_eq!(ran.github_path, format!("{}\n", dir.display()));
+        assert_eq!(
+            ran.temp,
+            vec![(PathBuf::from("lein-bin/lein"), stand_in.to_vec())]
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.join("lein"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o111, 0o111, "{mode:o}");
+        }
+        // `lein version`, which bootstraps the standalone jar.
+        assert!(
+            ran.stdout.contains("stand-in lein version"),
+            "{}",
+            ran.stdout
+        );
     }
 }

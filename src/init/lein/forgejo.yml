@@ -29,8 +29,9 @@
 # garbage collection and cache eviction remove them.
 #
 @FORGEJO_ACTIONS@
-# The JDK and Leiningen steps are fetched from github.com, where they were
-# pinned, so the runner needs to reach it.
+# The JDK step is an action fetched from github.com, where it was pinned,
+# and Leiningen's script is downloaded from raw.githubusercontent.com by
+# its pinned checksum, so the runner needs to reach both.
 name: greenshift
 
 on: [push, workflow_dispatch]
@@ -69,10 +70,32 @@ jobs:
         with:
           distribution: temurin
           java-version: '@JAVA@'
+      # Installed directly: the Clojure setup action the GitHub workflow
+      # uses answers HTTP 404 on Forgejo runners.
       - name: Set up Leiningen
-        uses: https://github.com/DeLaGuardo/setup-clojure@6d46099eae24853c33c0482f2bb54edf4f1a4c74 # 13.7.0
-        with:
-          lein: @LEIN@
+        shell: bash
+        run: |
+          set -euo pipefail
+          lein_version=@LEIN@
+          lein_sha256=@LEIN_SHA256@
+          download="$RUNNER_TEMP/lein.download"
+          dir="$RUNNER_TEMP/lein-bin"
+          # Whatever fails, no download is left behind.
+          trap 'rm -f "$download"' EXIT
+          curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            "https://raw.githubusercontent.com/technomancy/leiningen/$lein_version/bin/lein" \
+            --output "$download"
+          # Fail closed: only a script matching the pinned checksum is installed.
+          if ! printf '%s  %s\n' "$lein_sha256" "$download" | sha256sum --check --strict; then
+            echo "::error::Leiningen $lein_version does not match its pinned SHA-256; not installed"
+            exit 1
+          fi
+          mkdir -p "$dir"
+          chmod +x "$download"
+          mv "$download" "$dir/lein"
+          echo "$dir" >> "$GITHUB_PATH"
+          # Also downloads Leiningen's standalone jar.
+          "$dir/lein" version
 @SETUP@
       - name: Cache Maven dependencies
         uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
