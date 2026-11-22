@@ -18,6 +18,10 @@ use crate::tainted::Tainted;
 /// self-installs a snapshot jar that was never published).
 const LEIN_VERSION: &str = "2.12.0";
 
+/// The SHA-256 of [`LEIN_VERSION`]'s `bin/lein`, which the Forgejo
+/// workflow downloads and checks itself.
+const LEIN_SHA256: &str = "f8e1266c0c78c08bd4af6e111889ecc316c9dd56d1e8645bbee6c1703d351bc3";
+
 /// The project file `init lein` edits.
 pub const PROJECT_CLJ: &str = "project.clj";
 
@@ -370,6 +374,7 @@ pub fn workflow(settings: &Settings<'_>) -> String {
         .replace("@SHA256@", settings.sha256.as_str())
         .replace("@RUNS_ON@", settings.runs_on.as_str())
         .replace("@JAVA@", settings.java.as_str())
+        .replace("@LEIN_SHA256@", LEIN_SHA256)
         .replace("@LEIN@", LEIN_VERSION)
         // Last, so that nothing in the command is taken for a placeholder.
         .replace("@SETUP@\n", &setup)
