@@ -184,6 +184,76 @@ impl std::str::FromStr for SetupCommand {
     }
 }
 
+/// The file of `lein test` arguments for `--test-args-file`, relative
+/// to the project directory, as the workflow reads it: `/`-separated
+/// parts as for [`ProjectDir`], so that it goes into the workflow's
+/// bash and comments as it is, naming a file, not the directory itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestArgsFile(String);
+
+impl TestArgsFile {
+    /// The file, relative to the project directory.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Why a `--test-args-file` was refused. No message repeats the value:
+/// clap names it already.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum TestArgsFileError {
+    #[error(
+        "expected a file relative to the project directory (--project-dir, or the repository \
+         root), such as test-args"
+    )]
+    Empty,
+    #[error("expected a file relative to the project directory, not an absolute path")]
+    Absolute,
+    #[error("expected a file inside the project directory: no `..` parts")]
+    Parent,
+    #[error("expected a path of at most 1024 letters, digits, '.', '_', '-' and '/' separators")]
+    Chars,
+    #[error("expected a file, not a directory")]
+    Directory,
+}
+
+impl std::str::FromStr for TestArgsFile {
+    type Err = TestArgsFileError;
+
+    fn from_str(text: &str) -> Result<TestArgsFile, TestArgsFileError> {
+        let path = text.parse::<ProjectDir>().map_err(|error| match error {
+            ProjectDirError::Empty => TestArgsFileError::Empty,
+            ProjectDirError::Absolute => TestArgsFileError::Absolute,
+            ProjectDirError::Parent => TestArgsFileError::Parent,
+            ProjectDirError::Chars => TestArgsFileError::Chars,
+        })?;
+        // `ci/`, `ci/.` and `.` name directories.
+        if path.is_root() || matches!(text.rsplit('/').next(), Some("" | ".")) {
+            return Err(TestArgsFileError::Directory);
+        }
+        Ok(TestArgsFile(path.as_str().to_owned()))
+    }
+}
+
+/// `text` as `#` comment lines of at most 79 columns, but for a word
+/// longer than that.
+fn comment(text: &str) -> String {
+    let mut out = String::new();
+    let mut line = String::from("#");
+    for word in text.split_whitespace() {
+        if line.len() > 1 && line.len() + 1 + word.len() > 79 {
+            out.push_str(&line);
+            out.push('\n');
+            line = String::from("#");
+        }
+        line.push(' ');
+        line.push_str(word);
+    }
+    out.push_str(&line);
+    out.push('\n');
+    out
+}
+
 /// What the workflow is made from.
 #[derive(Debug, Clone)]
 pub struct Settings<'a> {
@@ -196,6 +266,9 @@ pub struct Settings<'a> {
     pub project: &'a ProjectDir,
     /// What to run before the tests, if anything.
     pub setup: Option<&'a SetupCommand>,
+    /// The file of `lein test` arguments the tests run with, if any;
+    /// without it, `lein test`'s default selection.
+    pub test_args: Option<&'a TestArgsFile>,
 }
 
 /// Where the workflow goes for `forge`: where `init nextest` writes its.
@@ -236,15 +309,45 @@ pub fn workflow(settings: &Settings<'_>) -> String {
             ),
         )
     };
-    let again = match (settings.setup.is_some(), !project.is_root()) {
-        (false, false) => "",
-        (false, true) => {
-            "# Give it the same --project-dir too, or the new workflow goes without it.\n"
-        }
-        (true, false) => "# Give it the same --setup too, or the new workflow goes without it.\n",
-        (true, true) => {
-            "# Give it the same --setup and --project-dir too, or the new workflow goes\n\
-             # without them.\n"
+    let flags: Vec<&str> = [
+        (settings.setup.is_some(), "--setup"),
+        (!project.is_root(), "--project-dir"),
+        (settings.test_args.is_some(), "--test-args-file"),
+    ]
+    .into_iter()
+    .filter_map(|(given, flag)| given.then_some(flag))
+    .collect();
+    let again = match flags.as_slice() {
+        [] => String::new(),
+        [flag] => comment(&format!(
+            "Give it the same {flag} too, or the new workflow goes without it."
+        )),
+        [init @ .., last] => comment(&format!(
+            "Give it the same {} and {last} too, or the new workflow goes without them.",
+            init.join(", ")
+        )),
+    };
+    let (selection, read_test_args, test_args) = match settings.test_args {
+        None => (
+            "# greenshift runs the Leiningen tests (`lein test`'s default selection),\n".to_owned(),
+            String::new(),
+            "",
+        ),
+        Some(file) => {
+            let shown = project.join(file.as_str());
+            (
+                comment(&format!(
+                    "greenshift runs the Leiningen tests (those `lein test` selects with the \
+                     arguments in {shown}, one per line, from --test-args-file),"
+                )),
+                super::nextest::indent(
+                    &include_str!("lein/test-args.sh")
+                        .replace("@ARGS_FILE@", file.as_str())
+                        .replace("@SHOWN@", &shown),
+                    10,
+                ),
+                r#" -- "${args[@]}""#,
+            )
         }
     };
     let setup = settings.setup.map_or_else(String::new, |setup| {
@@ -255,7 +358,10 @@ pub fn workflow(settings: &Settings<'_>) -> String {
         )
     });
     super::forgejo_paragraphs(template)
-        .replace("@AGAIN@\n", again)
+        .replace("@AGAIN@\n", &again)
+        .replace("@SELECTION@\n", &selection)
+        .replace("@READ_TEST_ARGS@\n", &read_test_args)
+        .replace("@TEST_ARGS@", test_args)
         .replace("@WORKING_DIRECTORY@\n", &working_directory)
         .replace("@HISTORY_FILES@\n", history_files)
         .replace("@PROJECT_CLJ@", &project.join(PROJECT_CLJ))
@@ -331,6 +437,7 @@ mod tests {
         let java = JavaVersion::default();
         let nested: ProjectDir = "upstream/app".parse().unwrap();
         let setup: SetupCommand = "./assemble".parse().unwrap();
+        let test_args: TestArgsFile = "ci/args".parse().unwrap();
         for (forge, project) in [Forge::Github, Forge::Forgejo]
             .into_iter()
             .flat_map(|forge| [(forge, ProjectDir::default()), (forge, nested.clone())])
@@ -345,6 +452,7 @@ mod tests {
                 java: &java,
                 project,
                 setup: Some(&setup),
+                test_args: Some(&test_args),
             });
             // Any `@NAME@` left, whether or not `workflow` knows the name.
             let parts: Vec<&str> = text.split('@').collect();
@@ -406,6 +514,48 @@ mod tests {
             "a".repeat(1025).parse::<ProjectDir>(),
             Err(ProjectDirError::Chars)
         );
+    }
+
+    #[test]
+    fn test_args_files_are_relative_files_inside_the_project() {
+        for (given, kept) in [
+            ("args", "args"),
+            ("./ci//test-selection", "ci/test-selection"),
+            (".test-args", ".test-args"),
+        ] {
+            assert_eq!(given.parse::<TestArgsFile>().unwrap().as_str(), kept);
+        }
+        for (bad, why) in [
+            ("", TestArgsFileError::Empty),
+            ("/args", TestArgsFileError::Absolute),
+            ("../args", TestArgsFileError::Parent),
+            ("ci/../args", TestArgsFileError::Parent),
+            ("my args", TestArgsFileError::Chars),
+            ("a'b", TestArgsFileError::Chars),
+            ("a$b", TestArgsFileError::Chars),
+            ("a\nb", TestArgsFileError::Chars),
+            (".", TestArgsFileError::Directory),
+            ("./", TestArgsFileError::Directory),
+            ("ci/", TestArgsFileError::Directory),
+            ("ci/.", TestArgsFileError::Directory),
+        ] {
+            assert_eq!(bad.parse::<TestArgsFile>(), Err(why), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn comments_wrap_at_79_columns() {
+        assert_eq!(comment("a b"), "# a b\n");
+        let long = "x".repeat(100);
+        assert_eq!(
+            comment(&format!("a {long} b")),
+            format!("# a\n# {long}\n# b\n")
+        );
+        // 39 five-letter words: 13 to a line of exactly 79 columns.
+        let words = "words ".repeat(39);
+        let wrapped = comment(&words);
+        assert_eq!(wrapped.lines().count(), 3, "{wrapped}");
+        assert!(wrapped.lines().all(|line| line.len() == 79));
     }
 
     #[test]

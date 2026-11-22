@@ -5,7 +5,9 @@
 //! The generated workflows are compared with `tests/golden/init-lein-github.yml`
 //! and `tests/golden/init-lein-forgejo.yml`, and with `--setup` and
 //! `--project-dir` as an overlay repository such as vaelii-lacuna gives
-//! them, `tests/golden/init-lein-forgejo-overlay.yml`; after a deliberate change to a
+//! them, `tests/golden/init-lein-forgejo-overlay.yml`, and with
+//! `--test-args-file`, `tests/golden/init-lein-github-test-args.yml` and
+//! `tests/golden/init-lein-forgejo-overlay-test-args.yml`; after a deliberate change to a
 //! template, rewrite them with
 //! `GREENSHIFT_BLESS=1 cargo test --test init_lein` and review the diff.
 //!

@@ -595,7 +595,7 @@ error, such as a missing or malformed `--release` or `--sha256`.
 greenshift init lein [--force] [--project-dir DIR]
                      [--ci [github|forgejo] --release TAG --sha256 HEX
                       [--runs-on LABEL] [--java-version VERSION]
-                      [--setup CMD]]
+                      [--setup CMD] [--test-args-file FILE]]
 ```
 
 `init lein` sets a Leiningen project up for `greenshift run lein`. Run it
@@ -657,8 +657,28 @@ and commit what it changes:
   [tests/golden/init-lein-forgejo-overlay.yml](tests/golden/init-lein-forgejo-overlay.yml)
   is the workflow for such a setup, written out in full.
 
-  Running `init` again to pin a new release needs the same `--setup` and
-  `--project-dir`, as the workflow's header says.
+- **`--test-args-file FILE`**, with `--ci`: a file of `lein test`
+  arguments (selectors and namespaces), one per line, for a workflow
+  that runs a chosen subset rather than `lein test`'s default selection.
+  `FILE` is relative to the project directory (`--project-dir`, or the
+  root), with no `..` parts. The workflow's test step reads it after
+  `--setup` has run, skips blank lines, and runs `greenshift run lein --
+  ARGS`, each line one argument as it is: never split, expanded or run.
+  It need not exist when `init` runs, so the setup may write it, but at
+  run time a missing or empty file, or one with a NUL or carriage return,
+  fails the step with an `::error`; it never falls back to the whole
+  suite. For vaelii-lacuna's subset, say:
+
+  ```
+  greenshift init lein --ci forgejo --release TAG --sha256 HEX \
+    --project-dir vaelii --setup '...' --test-args-file ci/test-selection
+  ```
+
+  [tests/golden/init-lein-forgejo-overlay-test-args.yml](tests/golden/init-lein-forgejo-overlay-test-args.yml)
+  is the workflow for such a setup.
+
+  Running `init` again to pin a new release needs the same `--setup`,
+  `--project-dir` and `--test-args-file`, as the workflow's header says.
 
 Nothing else: no reporter in the repository, no profile and nothing in
 `~/.lein`. It prints what it changed; a second run changes nothing and
