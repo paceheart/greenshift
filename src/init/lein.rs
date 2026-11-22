@@ -1,16 +1,16 @@
 //! `greenshift init lein`: the `:greenshift` test selector merged into a
 //! Leiningen project's `project.clj` ([`crate::lein::merge`]), which
 //! `greenshift run lein` runs each group with, and with `--ci`, a GitHub
-//! workflow of its own that runs `greenshift run lein` with durable
-//! history. Nothing else: the JUnit reporter comes with each run, so
-//! there is no reporter in the repository, no profile and nothing in
-//! `~/.lein`.
+//! or Forgejo workflow of its own that runs `greenshift run lein` with
+//! durable history, in the shape [`super::nextest`] writes for that
+//! forge. Nothing else: the JUnit reporter comes with each run, so there
+//! is no reporter in the repository, no profile and nothing in `~/.lein`.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 
-use super::{Action, Release, RunnerLabel, Sha256, Want};
+use super::{Action, Forge, Release, RunnerLabel, Sha256, Want};
 use crate::lein::{self, Merge};
 use crate::tainted::Tainted;
 
@@ -63,29 +63,34 @@ impl std::str::FromStr for JavaVersion {
 /// What the workflow is made from.
 #[derive(Debug, Clone)]
 pub struct Settings<'a> {
+    pub forge: Forge,
     pub release: &'a Release,
     pub sha256: &'a Sha256,
     pub runs_on: &'a RunnerLabel,
     pub java: &'a JavaVersion,
 }
 
-/// Where the workflow goes.
-pub fn workflow_path() -> PathBuf {
-    Path::new(".github/workflows/greenshift.yml").to_owned()
+/// Where the workflow goes for `forge`: where `init nextest` writes its.
+pub fn workflow_path(forge: Forge) -> PathBuf {
+    forge.workflow_path()
 }
 
 /// The workflow `init lein --ci` wants.
 pub fn wants(settings: &Settings<'_>) -> Vec<Want> {
     vec![Want {
-        path: workflow_path(),
+        path: workflow_path(settings.forge),
         content: workflow(settings),
     }]
 }
 
-/// The GitHub workflow for `settings`.
+/// The CI workflow for `settings`.
 pub fn workflow(settings: &Settings<'_>) -> String {
+    let template = match settings.forge {
+        Forge::Github => include_str!("lein/github.yml"),
+        Forge::Forgejo => include_str!("lein/forgejo.yml"),
+    };
     let install = super::nextest::indent(include_str!("nextest/install.sh"), 10);
-    include_str!("lein/github.yml")
+    super::forgejo_paragraphs(template)
         .replace("@INSTALL@\n", &install)
         .replace("@RELEASE@", settings.release.as_str())
         .replace("@SHA256@", settings.sha256.as_str())
@@ -135,16 +140,31 @@ mod tests {
     fn every_placeholder_is_filled() {
         let release: Release = "v0.3.0".parse().unwrap();
         let sha256: Sha256 = "a".repeat(64).parse().unwrap();
-        let runs_on = super::super::Forge::Github.default_runner();
         let java = JavaVersion::default();
-        let text = workflow(&Settings {
-            release: &release,
-            sha256: &sha256,
-            runs_on: &runs_on,
-            java: &java,
-        });
-        for name in ["INSTALL", "RELEASE", "SHA256", "RUNS_ON", "JAVA", "LEIN"] {
-            assert!(!text.contains(&format!("@{name}@")), "{name}");
+        for forge in [Forge::Github, Forge::Forgejo] {
+            let runs_on = forge.default_runner();
+            let text = workflow(&Settings {
+                forge,
+                release: &release,
+                sha256: &sha256,
+                runs_on: &runs_on,
+                java: &java,
+            });
+            // Any `@NAME@` left, whether or not `workflow` knows the name.
+            let parts: Vec<&str> = text.split('@').collect();
+            // Every piece with an `@` on both sides; `split` yields at
+            // least one piece, so `len() - 1` cannot underflow.
+            let between = parts.get(1..parts.len() - 1).unwrap_or(&[]);
+            let left: Vec<&&str> = between
+                .iter()
+                .filter(|name| {
+                    !name.is_empty()
+                        && name
+                            .bytes()
+                            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+                })
+                .collect();
+            assert!(left.is_empty(), "{forge:?}: {left:?}");
         }
     }
 

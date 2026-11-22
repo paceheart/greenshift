@@ -2,7 +2,7 @@
 //! to run its tests with `greenshift run nextest` in CI, keeping the
 //! durable history as docs/design/durable-history.md designs it.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::{Forge, Release, RunnerLabel, Sha256, Want};
 
@@ -22,7 +22,7 @@ pub struct Settings<'a> {
 
 /// Where the workflow goes for `forge`.
 pub fn workflow_path(forge: Forge) -> PathBuf {
-    Path::new(forge.dir()).join("workflows/greenshift.yml")
+    forge.workflow_path()
 }
 
 /// The files `init nextest` wants, in the order it reports them: only the
@@ -49,7 +49,7 @@ pub fn workflow(settings: &Settings<'_>) -> String {
 fn fill(template: &str, settings: &Settings<'_>) -> String {
     let install = indent(include_str!("nextest/install.sh"), 10);
     let install_rust = indent(include_str!("nextest/install-rust.sh"), 10);
-    template
+    super::forgejo_paragraphs(template)
         .replace("@INSTALL@\n", &install)
         .replace("@INSTALL_RUST@\n", &install_rust)
         .replace("@RELEASE@", settings.release.as_str())

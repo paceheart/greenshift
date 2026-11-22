@@ -1,0 +1,6 @@
+# Forgejo's artifact and cache actions differ from GitHub's: the artifact
+# steps use Forgejo's own forks, as stock v4 refuses to run here. Check a
+# first run on your instance; missing history, cache or artifacts warn and
+# never fail the job. Actions are named by full URL, not resolved against
+# the instance's DEFAULT_ACTIONS_URL, so that each pinned commit is looked
+# up in the repository it was pinned from, whatever that setting names.

@@ -593,7 +593,7 @@ error, such as a missing or malformed `--release` or `--sha256`.
 
 ```
 greenshift init lein [--force]
-                     [--ci [github] --release TAG --sha256 HEX
+                     [--ci [github|forgejo] --release TAG --sha256 HEX
                       [--runs-on LABEL] [--java-version VERSION]]
 ```
 
@@ -611,14 +611,23 @@ in the project's root and commit what it changes:
   unless `--force`, which replaces its value. A computed `:test-selectors`
   (`~(...)`) is refused (exit 1); `run lein` then uses `:only`.
 - **The workflow**, only with `--ci`: `.github/workflows/greenshift.yml`
-  (GitHub only, for now), a workflow of its own that runs `greenshift run
-  lein` with [durable history](docs/design/durable-history.md), in the
-  shape `init nextest` writes, with Temurin (`--java-version`, default
-  25), lein 2.12.0 and a cache of `~/.m2`. It is separate from the
-  project's own test workflow, which it leaves alone, and runs on pushes
-  and by hand, not on pull requests. `--release` and `--sha256` pin the
-  greenshift release as for `init nextest`, and are required with
+  for `--ci github` (the default when `--ci` is given alone) or
+  `.forgejo/workflows/greenshift.yml` for `--ci forgejo`, a workflow of
+  its own that runs `greenshift run lein` with
+  [durable history](docs/design/durable-history.md), in the shape
+  `init nextest` writes for that forge, with Temurin (`--java-version`,
+  default 25), lein 2.12.0 and a cache of `~/.m2`. It is separate from
+  the project's own test workflow, which it leaves alone, and runs on
+  pushes and by hand, not on pull requests. `--release` and `--sha256`
+  pin the greenshift release as for `init nextest`, and are required with
   `--ci`; the release must be one with `run lein`, later than v0.2.0.
+  `--runs-on` names the runner label (default `ubuntu-latest` on GitHub,
+  `docker` on Forgejo). On Forgejo the workflow is **not isolated**, as
+  for `init nextest` (see **Set up a repo**): the file says so at the
+  top, and `init` says so when it runs, and also when writing
+  `.forgejo/workflows` would stop other workflows running. Its JDK and
+  Leiningen steps are fetched from github.com, so the runner needs to
+  reach it.
 
 Nothing else: no reporter in the repository, no profile and nothing in
 `~/.lein`. It prints what it changed; a second run changes nothing and

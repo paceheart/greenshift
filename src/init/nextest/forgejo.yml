@@ -6,29 +6,7 @@
 # validation does not establish schema support. Never strip report memberships
 # or replace the publisher with a binary built by the test job.
 #
-# THIS WORKFLOW IS NOT ISOLATED. greenshift's durable-history design
-# (docs/design/durable-history.md, "Forgejo capability gate") says:
-#
-#   Stock Forgejo runner v13.2.2 exports its automatic repository token to
-#   every step as both GITHUB_TOKEN and FORGEJO_TOKEN. Stock Forgejo
-#   v16.0.3/v17.0.2 grants that token write access outside fork pull
-#   requests and ignores workflow permissions. persist-credentials:false or
-#   only referencing the token in a publisher step does not make its test
-#   job read-only. A separate publisher credential does not revoke the
-#   automatic one. This is a platform baseline, not an additional
-#   privilege granted by greenshift, but it does not satisfy this design's
-#   read-only-test-job guarantee.
-#
-#   Consequently no ordinary push-test Forgejo workflow is offered as
-#   isolated.
-#
-# So the tests, and everything they build and run, can write this
-# repository, refs/greenshift/history included, with the job's token.
-# The jobs below are kept apart as on GitHub, so that only the pinned,
-# checksummed greenshift publishes, and only for pushes to the default
-# branch; but that limits what greenshift does, not what test code can
-# do. No `permissions` are written: Forgejo ignores them, and they would
-# claim otherwise.
+@NOT_ISOLATED@
 #
 # The history, every run's test results by commit and branch, is kept
 # whole, never pruned, and published where anyone who can read this
@@ -39,12 +17,7 @@
 # the history again. Earlier copies stay with the forge until its
 # garbage collection and cache eviction remove them.
 #
-# Forgejo's artifact and cache actions differ from GitHub's: the artifact
-# steps use Forgejo's own forks, as stock v4 refuses to run here. Check a
-# first run on your instance; missing history, cache or artifacts warn and
-# never fail the job. Actions are named by full URL, not resolved against
-# the instance's DEFAULT_ACTIONS_URL, so that each pinned commit is looked
-# up in the repository it was pinned from, whatever that setting names.
+@FORGEJO_ACTIONS@
 name: greenshift
 
 on: [push, pull_request]

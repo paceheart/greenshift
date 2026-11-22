@@ -2,8 +2,9 @@
 //! merged into project.clj, the workflow only with `--ci`, that a second
 //! run changes nothing, `--force`, and what it refuses.
 //!
-//! The generated workflow is compared with `tests/golden/init-lein-github.yml`;
-//! after a deliberate change to the template, rewrite it with
+//! The generated workflows are compared with `tests/golden/init-lein-github.yml`
+//! and `tests/golden/init-lein-forgejo.yml`; after a deliberate change to a
+//! template, rewrite them with
 //! `GREENSHIFT_BLESS=1 cargo test --test init_lein` and review the diff.
 //!
 //! With `GREENSHIFT_VAELII_PROJECT_CLJ` naming a vaelii checkout's
@@ -17,6 +18,7 @@ use predicates::prelude::*;
 const RELEASE: &str = "v0.3.0";
 const SHA256: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const WORKFLOW: &str = ".github/workflows/greenshift.yml";
+const FORGEJO_WORKFLOW: &str = ".forgejo/workflows/greenshift.yml";
 
 const VAELII: &str = include_str!("../fixtures/lein/vaelii-project.clj");
 
@@ -43,6 +45,44 @@ fn init(dir: &Path, args: &[&str]) -> Command {
 
 fn ci_args() -> [&'static str; 5] {
     ["--ci", "--release", RELEASE, "--sha256", SHA256]
+}
+
+fn forgejo_args() -> [&'static str; 6] {
+    ["--ci", "forgejo", "--release", RELEASE, "--sha256", SHA256]
+}
+
+/// Assert `written` is the golden file `name`, rewriting it first under
+/// `GREENSHIFT_BLESS`.
+fn assert_golden(written: &str, name: &str) {
+    let golden = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden")
+        .join(name);
+    if std::env::var_os("GREENSHIFT_BLESS").is_some() {
+        std::fs::write(&golden, written).unwrap();
+    }
+    let expected = std::fs::read_to_string(&golden).unwrap();
+    assert!(
+        written == expected,
+        "differs from {}; rerun with GREENSHIFT_BLESS=1 if meant\n{written}",
+        golden.display()
+    );
+}
+
+/// The YAML file at `path` as JSON, by mikefarah's yq v4, which the
+/// other workflow tests need too: without it the test fails rather than
+/// passing having checked nothing.
+fn yaml(path: &Path) -> serde_json::Value {
+    let out = std::process::Command::new("yq")
+        .args(["-o=json", "."])
+        .arg(path)
+        .output()
+        .expect("mikefarah yq installed as for cache_guard tests");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap()
 }
 
 fn project(text: &str) -> tempfile::TempDir {
@@ -206,16 +246,7 @@ fn the_workflow_is_written_only_with_ci_and_matches_the_golden() {
         .success()
         .stdout(predicate::str::contains(format!("wrote {WORKFLOW}")));
     let written = read(dir.path(), WORKFLOW);
-    let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/init-lein-github.yml");
-    if std::env::var_os("GREENSHIFT_BLESS").is_some() {
-        std::fs::write(&golden, &written).unwrap();
-    }
-    let expected = std::fs::read_to_string(&golden).unwrap();
-    assert!(
-        written == expected,
-        "differs from {}; rerun with GREENSHIFT_BLESS=1 if meant\n{written}",
-        golden.display()
-    );
+    assert_golden(&written, "init-lein-github.yml");
     assert!(written.contains("run lein --history-remote"));
     assert!(written.contains(&format!("GREENSHIFT_RELEASE: '{RELEASE}'")));
     assert!(written.contains("java-version: '25'"));
@@ -253,20 +284,27 @@ fn ci_options_need_ci_and_ci_needs_its_pin() {
         &["--ci"],
         &["--ci", "--release", RELEASE],
         &["--ci", "--sha256", SHA256],
-        &["--ci", "forgejo", "--release", RELEASE, "--sha256", SHA256],
+        &["--ci", "forgejo"],
+        &["--ci", "forgejo", "--release", RELEASE],
+        &["--ci", "forgejo", "--sha256", SHA256],
+        &["--ci", "gitlab", "--release", RELEASE, "--sha256", SHA256],
         // Releases up to v0.2.0 have no `run lein`.
         &["--ci", "--release", "v0.2.0", "--sha256", SHA256],
         &["--ci", "--release", "v0.1.1", "--sha256", SHA256],
+        &["--ci", "forgejo", "--release", "v0.2.0", "--sha256", SHA256],
     ] {
         init(dir.path(), args).assert().code(2);
     }
     assert_eq!(read(dir.path(), "project.clj"), VAELII);
+    assert!(!dir.path().join(".github").exists());
+    assert!(!dir.path().join(".forgejo").exists());
     init(
         dir.path(),
         &["--ci", "github", "--release", RELEASE, "--sha256", SHA256],
     )
     .assert()
     .success();
+    init(dir.path(), &forgejo_args()).assert().success();
 }
 
 #[test]
@@ -286,25 +324,19 @@ fn a_conflicting_workflow_means_project_clj_is_not_written_either() {
 fn the_workflow_is_yaml_with_the_two_job_shape() {
     let dir = project(VAELII);
     init(dir.path(), &ci_args()).assert().success();
-    let out = std::process::Command::new("yq")
-        .args(["-o=json", "."])
-        .arg(dir.path().join(WORKFLOW))
-        .output();
-    let Ok(out) = out else {
-        eprintln!("skipped: no yq");
-        return;
-    };
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let workflow: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let workflow = yaml(&dir.path().join(WORKFLOW));
+    assert_two_jobs(&workflow);
     assert_eq!(workflow["jobs"]["test"]["permissions"]["contents"], "read");
     assert_eq!(
         workflow["jobs"]["publish"]["permissions"]["contents"],
         "write"
     );
+}
+
+/// What every lein workflow has, whatever the forge: on pushes and by
+/// hand only, a publisher that needs the test job and runs no lein, and
+/// every action pinned to a commit.
+fn assert_two_jobs(workflow: &serde_json::Value) {
     assert_eq!(workflow["jobs"]["publish"]["needs"], "test");
     assert_eq!(
         workflow["on"],
@@ -314,4 +346,232 @@ fn the_workflow_is_yaml_with_the_two_job_shape() {
         assert!(!step["uses"].as_str().unwrap_or("").contains("checkout"));
         assert!(!step["run"].as_str().unwrap_or("").contains("lein"));
     }
+    for job in ["test", "publish"] {
+        for step in workflow["jobs"][job]["steps"].as_array().unwrap() {
+            if let Some(uses) = step["uses"].as_str() {
+                let (_, rev) = uses.rsplit_once('@').unwrap();
+                assert!(
+                    rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_hexdigit()),
+                    "{uses} is not pinned to a commit"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn forgejo_writes_the_golden_workflow_and_says_it_is_not_isolated() {
+    let dir = project(VAELII);
+    let out = init(dir.path(), &forgejo_args()).assert().success();
+    let out = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(out.contains(&format!("wrote {FORGEJO_WORKFLOW}")), "{out}");
+    assert!(
+        out.contains("added the :greenshift test selector to project.clj"),
+        "{out}"
+    );
+    assert_eq!(
+        out.lines()
+            .filter(|line| line.contains("not isolated"))
+            .count(),
+        1,
+        "{out}"
+    );
+    assert!(!dir.path().join(".github").exists());
+    let written = read(dir.path(), FORGEJO_WORKFLOW);
+    assert_golden(&written, "init-lein-forgejo.yml");
+    assert!(written.starts_with("# Generated by `greenshift init lein --ci forgejo`"));
+    assert!(
+        written.contains("THIS WORKFLOW IS NOT ISOLATED"),
+        "{written}"
+    );
+    assert!(
+        !written.contains("permissions:"),
+        "permissions would be ignored"
+    );
+    assert!(written.contains("run lein --history-remote"));
+    assert!(written.contains("java-version: '25'"));
+    assert!(written.contains("lein: 2.12.0"));
+    assert_eq!(written.matches("runs-on: 'docker'").count(), 2);
+    for name in [
+        "RELEASE",
+        "SHA256",
+        "RUNS_ON",
+        "INSTALL",
+        "JAVA",
+        "LEIN",
+        "NOT_ISOLATED",
+        "FORGEJO_ACTIONS",
+    ] {
+        assert!(!written.contains(&format!("@{name}@")), "{name}");
+    }
+}
+
+#[test]
+fn forgejo_names_every_action_by_url_and_claims_no_permissions() {
+    let dir = project(VAELII);
+    init(dir.path(), &forgejo_args()).assert().success();
+    let workflow = yaml(&dir.path().join(FORGEJO_WORKFLOW));
+    assert_two_jobs(&workflow);
+    assert!(workflow["permissions"].is_null());
+    let mut seen = Vec::new();
+    for job in ["test", "publish"] {
+        assert!(workflow["jobs"][job]["permissions"].is_null(), "{job}");
+        assert_eq!(workflow["jobs"][job]["runs-on"], "docker", "{job}");
+        for step in workflow["jobs"][job]["steps"].as_array().unwrap() {
+            if let Some(uses) = step["uses"].as_str() {
+                // Not resolved against the instance's DEFAULT_ACTIONS_URL.
+                assert!(uses.starts_with("https://"), "{uses}");
+                if uses.contains("artifact@") {
+                    // Stock v4 artifact actions refuse to run on Forgejo.
+                    assert!(uses.contains("/forgejo/"), "{uses}");
+                }
+                seen.push(uses.rsplit_once('@').unwrap().0.to_owned());
+            }
+        }
+    }
+    for action in ["setup-java", "setup-clojure", "actions/cache"] {
+        assert!(seen.iter().any(|uses| uses.contains(action)), "{seen:?}");
+    }
+}
+
+#[test]
+fn forgejo_takes_the_runner_and_java_version_and_is_idempotent() {
+    let dir = project(VAELII);
+    let mut args = forgejo_args().to_vec();
+    args.extend(["--java-version", "21", "--runs-on", "self-hosted"]);
+    init(dir.path(), &args).assert().success();
+    let written = read(dir.path(), FORGEJO_WORKFLOW);
+    assert!(written.contains("java-version: '21'"));
+    assert!(written.contains("jdk21-"));
+    assert_eq!(written.matches("runs-on: 'self-hosted'").count(), 2);
+    let before = snapshot(dir.path());
+    init(dir.path(), &args)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nothing to change"))
+        .stdout(predicate::str::contains("not isolated"));
+    assert_eq!(snapshot(dir.path()), before);
+}
+
+#[test]
+fn forgejo_says_when_its_workflow_would_stop_the_github_ones_running() {
+    let dir = project(VAELII);
+    std::fs::create_dir_all(dir.path().join(".github/workflows")).unwrap();
+    std::fs::write(dir.path().join(".github/workflows/ci.yml"), "on: push\n").unwrap();
+    init(dir.path(), &forgejo_args())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "stops running the workflows in .github/workflows",
+        ));
+    init(dir.path(), &forgejo_args())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("stops running").not());
+}
+
+#[test]
+fn a_conflicting_forgejo_workflow_means_project_clj_is_not_written_either() {
+    let dir = project(VAELII);
+    std::fs::create_dir_all(dir.path().join(".forgejo/workflows")).unwrap();
+    std::fs::write(dir.path().join(FORGEJO_WORKFLOW), "mine\n").unwrap();
+    init(dir.path(), &forgejo_args())
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("nothing written"));
+    assert_eq!(read(dir.path(), "project.clj"), VAELII);
+    assert_eq!(read(dir.path(), FORGEJO_WORKFLOW), "mine\n");
+    init(dir.path(), &[&forgejo_args()[..], &["--force"]].concat())
+        .assert()
+        .success();
+    assert!(read(dir.path(), FORGEJO_WORKFLOW).contains("THIS WORKFLOW IS NOT ISOLATED"));
+}
+
+#[test]
+fn the_forgejo_workflow_is_the_github_one_but_for_what_forgejo_needs() {
+    let mut workflows = Vec::new();
+    for args in [&ci_args()[..], &forgejo_args()[..]] {
+        let dir = project(VAELII);
+        init(dir.path(), args).assert().success();
+        let path = if args.contains(&"forgejo") {
+            FORGEJO_WORKFLOW
+        } else {
+            WORKFLOW
+        };
+        let workflow = yaml(&dir.path().join(path));
+        workflows.push(workflow);
+    }
+    let (github, forgejo) = (&workflows[0], &workflows[1]);
+    // Everything but the jobs is the same; `permissions` are GitHub's
+    // alone, as Forgejo ignores them.
+    assert_eq!(
+        without(github, &["jobs", "permissions"]),
+        without(forgejo, &["jobs", "permissions"])
+    );
+    assert_eq!(
+        github["jobs"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        forgejo["jobs"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>()
+    );
+    for job in ["test", "publish"] {
+        let (github, forgejo) = (&github["jobs"][job], &forgejo["jobs"][job]);
+        // `if`, `needs`, `concurrency`, `env` and the rest; `runs-on` is
+        // each forge's default runner.
+        assert_eq!(
+            without(github, &["steps", "permissions", "runs-on"]),
+            without(forgejo, &["steps", "permissions", "runs-on"]),
+            "{job}"
+        );
+        let github = github["steps"].as_array().unwrap();
+        let forgejo = forgejo["steps"].as_array().unwrap();
+        assert_eq!(github.len(), forgejo.len(), "{job}");
+        for (github, forgejo) in github.iter().zip(forgejo) {
+            let (mut github_step, forgejo_step) =
+                (without(github, &["uses"]), without(forgejo, &["uses"]));
+            let (Some(github), Some(forgejo)) = (github["uses"].as_str(), forgejo["uses"].as_str())
+            else {
+                assert!(github["uses"].is_null() && forgejo["uses"].is_null());
+                assert_eq!(github_step, forgejo_step, "{job}");
+                continue;
+            };
+            if github.starts_with("actions/") && github.contains("-artifact@") {
+                // Forgejo's own forks: stock v4 refuses to run there.
+                assert!(
+                    forgejo.starts_with("https://code.forgejo.org/forgejo/"),
+                    "{forgejo}"
+                );
+                if github.contains("upload-artifact@") {
+                    // The fork, v4.3.1, has no such input: it predates
+                    // leaving hidden files out by default.
+                    let with = github_step["with"].as_object_mut().unwrap();
+                    assert_eq!(with.remove("include-hidden-files"), Some(true.into()));
+                }
+            } else if github.starts_with("actions/checkout@") || github.starts_with("actions/cache")
+            {
+                // Forgejo's mirror: the same repository at the same commit.
+                assert_eq!(forgejo, format!("https://data.forgejo.org/{github}"));
+            } else {
+                assert_eq!(forgejo, format!("https://github.com/{github}"));
+            }
+            // Name, `id`, `if`, `with`, `env`, `run` and the rest.
+            assert_eq!(github_step, forgejo_step, "{job}: {github}");
+        }
+    }
+}
+
+/// `value`, a JSON object, without `keys`.
+fn without(value: &serde_json::Value, keys: &[&str]) -> serde_json::Value {
+    let mut value = value.clone();
+    let object = value.as_object_mut().unwrap();
+    for key in keys {
+        object.remove(*key);
+    }
+    value
 }

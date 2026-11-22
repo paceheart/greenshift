@@ -58,6 +58,12 @@ impl Forge {
         }
     }
 
+    /// Where `init` writes the forge's workflow, relative to the
+    /// repository root.
+    pub fn workflow_path(self) -> PathBuf {
+        Path::new(self.dir()).join("workflows/greenshift.yml")
+    }
+
     /// The runner label jobs use unless `--runs-on` is given: GitHub's
     /// hosted Ubuntu runner, and the label a Forgejo runner registers by
     /// default.
@@ -121,6 +127,22 @@ pub fn forgejo_would_hide(root: &Path) -> Option<&'static str> {
     let has_any =
         std::fs::read_dir(root.join(now)).is_ok_and(|mut entries| entries.next().is_some());
     has_any.then_some(now)
+}
+
+/// `template` with the header paragraphs every Forgejo workflow shares
+/// filled in: `@NOT_ISOLATED@`, the capability gate quoted and what it
+/// means, and `@FORGEJO_ACTIONS@`, how its actions differ from GitHub's.
+/// A template without them is returned as it is.
+pub(crate) fn forgejo_paragraphs(template: &str) -> String {
+    template
+        .replace(
+            "@NOT_ISOLATED@\n",
+            include_str!("init/forgejo/not-isolated.txt"),
+        )
+        .replace(
+            "@FORGEJO_ACTIONS@\n",
+            include_str!("init/forgejo/actions.txt"),
+        )
 }
 
 /// A greenshift release tag, `vMAJOR.MINOR.PATCH`, as the release

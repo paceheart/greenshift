@@ -139,9 +139,10 @@ pub enum InitBackend {
 
 #[derive(Debug, Args)]
 pub struct InitLeinArgs {
-    /// Also write a GitHub workflow, .github/workflows/greenshift.yml,
-    /// that runs `greenshift run lein` with durable history. Only GitHub
-    /// is supported for now.
+    /// Also write a workflow that runs `greenshift run lein` with durable
+    /// history: .github/workflows/greenshift.yml for github (the default
+    /// when --ci is given alone), or .forgejo/workflows/greenshift.yml
+    /// for forgejo.
     #[arg(long, value_enum, value_name = "FORGE", num_args = 0..=1,
           default_missing_value = "github")]
     pub ci: Option<crate::init::Forge>,
@@ -157,7 +158,7 @@ pub struct InitLeinArgs {
     pub sha256: Option<crate::init::Sha256>,
 
     /// The runner label the jobs run on, an x86_64 Linux runner.
-    /// Default: ubuntu-latest.
+    /// Default: ubuntu-latest on GitHub, docker on Forgejo.
     #[arg(long, value_name = "LABEL", requires = "ci")]
     pub runs_on: Option<crate::init::RunnerLabel>,
 
@@ -607,18 +608,7 @@ pub fn init_nextest(args: &InitNextestArgs, root: &std::path::Path) -> anyhow::R
         },
     };
     if forge == Forge::Forgejo {
-        println!(
-            "greenshift: note: the Forgejo workflow is not isolated: every step, the tests \
-             included, gets a token that can write the repository (see the top of the file)"
-        );
-        if let Some(hidden) = init::forgejo_would_hide(root) {
-            println!(
-                "greenshift: note: Forgejo runs the workflows of only the first of \
-                 .forgejo/workflows, .gitea/workflows and .github/workflows there is, so \
-                 committing .forgejo/workflows stops running the workflows in {hidden}; \
-                 move them into .forgejo/workflows to keep them"
-            );
-        }
+        forgejo_notes(root);
     }
     let runs_on = args
         .runs_on
@@ -635,22 +625,31 @@ pub fn init_nextest(args: &InitNextestArgs, root: &std::path::Path) -> anyhow::R
     init::apply(root, &actions)
 }
 
+/// Say, on stdout, what writing a Forgejo workflow into the repository at
+/// `root` means: that it is not isolated, and which workflows Forgejo
+/// would stop running, if any.
+fn forgejo_notes(root: &std::path::Path) {
+    println!(
+        "greenshift: note: the Forgejo workflow is not isolated: every step, the tests \
+         included, gets a token that can write the repository (see the top of the file)"
+    );
+    if let Some(hidden) = crate::init::forgejo_would_hide(root) {
+        println!(
+            "greenshift: note: Forgejo runs the workflows of only the first of \
+             .forgejo/workflows, .gitea/workflows and .github/workflows there is, so \
+             committing .forgejo/workflows stops running the workflows in {hidden}; \
+             move them into .forgejo/workflows to keep them"
+        );
+    }
+}
+
 /// Set the Leiningen project at `root` up for `greenshift run lein`; see
 /// [`crate::init::lein`].
 pub fn init_lein(args: &InitLeinArgs, root: &std::path::Path) -> anyhow::Result<ExitCode> {
     use crate::init::{self, Forge};
     let workflow = match (args.ci, &args.release, &args.sha256) {
         (None, ..) => None,
-        (Some(Forge::Forgejo), ..) => {
-            eprintln!(
-                "greenshift: usage error: init lein writes a GitHub workflow only, for now; \
-                 use --ci github"
-            );
-            return Ok(ExitCode::from(2));
-        }
-        (Some(Forge::Github), Some(release), _)
-            if release.version() <= init::LAST_RELEASE_WITHOUT_LEIN =>
-        {
+        (Some(_), Some(release), _) if release.version() <= init::LAST_RELEASE_WITHOUT_LEIN => {
             let (major, minor, patch) = init::LAST_RELEASE_WITHOUT_LEIN;
             eprintln!(
                 "greenshift: usage error: --release {}: v{major}.{minor}.{patch} and earlier \
@@ -659,20 +658,24 @@ pub fn init_lein(args: &InitLeinArgs, root: &std::path::Path) -> anyhow::Result<
             );
             return Ok(ExitCode::from(2));
         }
-        (Some(Forge::Github), Some(release), Some(sha256)) => Some((release, sha256)),
-        (Some(Forge::Github), ..) => {
+        (Some(forge), Some(release), Some(sha256)) => Some((forge, release, sha256)),
+        (Some(_), ..) => {
             eprintln!("greenshift: usage error: --ci needs --release and --sha256");
             return Ok(ExitCode::from(2));
         }
     };
     let mut actions = vec![init::lein::project_action(root, args.force)?];
-    if let Some((release, sha256)) = workflow {
+    if let Some((forge, release, sha256)) = workflow {
+        if forge == Forge::Forgejo {
+            forgejo_notes(root);
+        }
         let runs_on = args
             .runs_on
             .clone()
-            .unwrap_or_else(|| Forge::Github.default_runner());
+            .unwrap_or_else(|| forge.default_runner());
         let java = args.java_version.clone().unwrap_or_default();
         let settings = init::lein::Settings {
+            forge,
             release,
             sha256,
             runs_on: &runs_on,
