@@ -619,6 +619,44 @@ fn a_namespace_the_listing_is_given_outside_the_test_paths_is_refused() {
 }
 
 #[test]
+fn a_namespace_outside_the_test_paths_is_refused_also_when_a_test_namespace_requires_it() {
+    let _turn = turn();
+    if !lein_ready() {
+        return;
+    }
+    let project = Project::new();
+    // scratch.helper, in src/, is loaded only because a namespace under
+    // :test-paths requires it: whether a group loads it depends on what
+    // else the plan puts in the group, so it is refused all the same.
+    std::fs::write(
+        project.root().join("src/scratch/helper.clj"),
+        "(ns scratch.helper (:require [clojure.test :refer :all]))\n\
+         (deftest in-helper (is true))\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.root().join("test/scratch/uses_helper_test.clj"),
+        "(ns scratch.uses-helper-test (:require [clojure.test :refer :all] [scratch.helper]))\n\
+         (deftest uses (is true))\n",
+    )
+    .unwrap();
+    for init in [false, true] {
+        if init {
+            project.init();
+        }
+        let out = project.run(&["--", "scratch.uses-helper-test", "scratch.helper"], &[]);
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "init {init}: {stderr}");
+        assert!(
+            stderr.contains("scratch.helper is not under :test-paths"),
+            "init {init}: {stderr}"
+        );
+        assert!(!stderr.contains("scratch.uses-helper-test is"), "{stderr}");
+        assert!(!project.db.exists() || project.runs().is_empty());
+    }
+}
+
+#[test]
 fn a_listing_that_fails_ends_the_run_with_its_status_and_records_nothing() {
     let _turn = turn();
     if !lein_ready() {

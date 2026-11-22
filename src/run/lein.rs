@@ -144,8 +144,8 @@ pub fn list_script(out: &Path) -> anyhow::Result<String> {
 
 /// The reporter injection for one run: it sets the property the
 /// `:greenshift` selector reads to `names`, and writes the run's JUnit
-/// to `junit`, or, when `names` names a namespace lein did not load,
-/// those namespaces to [`unloaded_file`] instead.
+/// to `junit`, or, when `names` names a namespace lein did not require
+/// itself, those namespaces to [`unloaded_file`] instead.
 pub fn run_script(names: &Path, junit: &Path) -> anyhow::Result<String> {
     let unloaded = clojure_path(&unloaded_file(junit))?;
     let names = clojure_path(names)?;
@@ -158,7 +158,8 @@ pub fn run_script(names: &Path, junit: &Path) -> anyhow::Result<String> {
 }
 
 /// Where the reporter writing `junit` lists the namespaces it was given
-/// that lein never loaded, one a line: those outside `:test-paths`.
+/// that lein did not require itself, one a line: those outside
+/// `:test-paths`.
 pub fn unloaded_file(junit: &Path) -> PathBuf {
     junit.with_extension("unloaded")
 }

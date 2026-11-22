@@ -21,12 +21,14 @@
 ;; - A namespace the names file names runs even when lein did not select
 ;;   it (lein selects one only for a public test, so a group of its private
 ;;   tests alone would never run), its unnamed tests set aside meanwhile.
-;; - A namespace the names file names that lein never loaded is outside
-;;   :test-paths: before run-tests, lein loads every namespace there that
-;;   :greenshift or :only selects. greenshift does not load it, as `lein
-;;   test <ns>` would, so the run runs and writes nothing, and lists such
-;;   namespaces in a file of their own for greenshift to refuse the run;
-;;   lein exits 1.
+;; - A namespace the names file names that lein did not require itself is
+;;   outside :test-paths: before run-tests, lein requires, in one call,
+;;   every namespace there that :greenshift or :only selects. greenshift
+;;   does not load such a namespace, as `lein test <ns>` would, nor run it
+;;   when a namespace lein required loaded it (whether one in the group
+;;   does depends on the plan), so the run runs and writes nothing, and
+;;   lists such namespaces in a file of their own for greenshift to refuse
+;;   the run; lein exits 1.
 ;; - Every name in the names file that never ran is <skipped>: after a
 ;;   fixture error in its namespace, "not run: fixture error in <ns>", and
 ;;   otherwise "not run". A var that began but never ended (the JVM exited
@@ -208,6 +210,11 @@
   [^String path]
   (into [] (comp (remove str/blank?) (distinct)) (str/split-lines (slurp path))))
 
+;; The names of the namespaces required other than from inside a require:
+;; lein's own (apply require namespaces), which loads those it selected.
+(def ^:private required (atom #{}))
+(def ^:private ^:dynamic *requiring* false)
+
 ;; The kind of report one of greenshift's methods is recording now, or nil.
 (def ^:private ^:dynamic *recording* nil)
 
@@ -241,8 +248,8 @@
   "Record every test var's result and write them as JUnit to junit when
   the run ends; run the namespaces in the order the names file first
   names them, the rest after, as given. When the names file names a
-  namespace lein never loaded, run nothing and write those namespaces to
-  unloaded instead, one a line."
+  namespace lein did not require itself, run nothing and write those
+  namespaces to unloaded instead, one a line."
   [{:keys [^String names ^String junit ^String unloaded]}]
   (let [names (read-names names)
         wanted (set names)
@@ -341,14 +348,21 @@
                (doseq [v aside]
                  (alter-meta! v #(-> % (assoc :test (::set-aside %)) (dissoc ::set-aside))))
                (write! junit names)))))))
+    (alter-var-root
+     #'clojure.core/require
+     (fn [require]
+       (fn [& args]
+         (if *requiring*
+           (apply require args)
+           (do (swap! required into (map str (filter symbol? args)))
+               (binding [*requiring* true]
+                 (apply require args)))))))
     ;; Outermost, so it decides before anything runs or is recorded.
     (alter-var-root
      #'t/run-tests
      (fn [run-tests]
        (fn [& namespaces]
-         (let [given (set (map ns-str namespaces))
-               outside (remove #(or (given %) (find-ns (symbol %)))
-                               (sort-by order (keys order)))]
+         (let [outside (remove @required (sort-by order (keys order)))]
            (if (seq outside)
              (do (spit unloaded (apply str (map #(str % "\n") outside)))
                  {:type :summary :test 0 :pass 0 :fail 0 :error 1})
