@@ -2,9 +2,9 @@
 //! Leiningen project's `project.clj` ([`crate::lein::merge`]), which
 //! `greenshift run lein` runs each group with, and with `--ci`, a GitHub
 //! or Forgejo workflow of its own that runs `greenshift run lein` with
-//! durable history, in the shape [`super::nextest`] writes for that forge. Nothing else: the JUnit reporter comes with each run, so
-//! there is no reporter in the repository, no profile and nothing in
-//! `~/.lein`.
+//! durable history, in the shape [`super::nextest`] writes for that
+//! forge. Nothing else: the JUnit reporter comes with each run, so there
+//! is no reporter in the repository, no profile and nothing in `~/.lein`.
 
 use std::path::{Path, PathBuf};
 
@@ -150,18 +150,21 @@ mod tests {
                 runs_on: &runs_on,
                 java: &java,
             });
-            for name in [
-                "INSTALL",
-                "RELEASE",
-                "SHA256",
-                "RUNS_ON",
-                "JAVA",
-                "LEIN",
-                "NOT_ISOLATED",
-                "FORGEJO_ACTIONS",
-            ] {
-                assert!(!text.contains(&format!("@{name}@")), "{forge:?}: {name}");
-            }
+            // Any `@NAME@` left, whether or not `workflow` knows the name.
+            let parts: Vec<&str> = text.split('@').collect();
+            // Every piece with an `@` on both sides; `split` yields at
+            // least one piece, so `len() - 1` cannot underflow.
+            let between = parts.get(1..parts.len() - 1).unwrap_or(&[]);
+            let left: Vec<&&str> = between
+                .iter()
+                .filter(|name| {
+                    !name.is_empty()
+                        && name
+                            .bytes()
+                            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+                })
+                .collect();
+            assert!(left.is_empty(), "{forge:?}: {left:?}");
         }
     }
 
