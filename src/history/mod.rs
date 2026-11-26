@@ -34,14 +34,28 @@ const KEPT_GIT_VARS: [&str; 2] = ["GIT_SSL_CAINFO", "GIT_SSL_CAPATH"];
 ///
 /// Git's inherited configuration can run hooks, redirect object stores, or
 /// install remote helpers. Only the isolated transport owns its state, except
-/// for the CA trust in `KEPT_GIT_VARS`.
+/// for the CA trust in `KEPT_GIT_VARS`. Windows environment names are
+/// case-insensitive, so there `Git_Dir` is `GIT_DIR` to git and is matched
+/// without regard to case.
 fn scrubbed_git_vars(
     keys: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Vec<std::ffi::OsString> {
+    scrubbed_git_vars_with_case(keys, cfg!(windows))
+}
+
+fn scrubbed_git_vars_with_case(
+    keys: impl IntoIterator<Item = std::ffi::OsString>,
+    case_insensitive: bool,
 ) -> Vec<std::ffi::OsString> {
     keys.into_iter()
         .filter(|key| {
             let key = key.to_string_lossy();
-            key.starts_with("GIT_") && !KEPT_GIT_VARS.contains(&key.as_ref())
+            let key = if case_insensitive {
+                key.to_ascii_uppercase()
+            } else {
+                key.into_owned()
+            };
+            key.starts_with("GIT_") && !KEPT_GIT_VARS.contains(&key.as_str())
         })
         .collect()
 }
@@ -955,6 +969,27 @@ mod tests {
                 "GIT_ASKPASS",
             ]
             .map(std::ffi::OsString::from)
+        );
+    }
+
+    #[test]
+    fn test_git_scrub_ignores_case_where_the_environment_does() {
+        let keys = [
+            "Git_Dir",
+            "git_askpass",
+            "Git_Ssl_CaInfo",
+            "GIT_SSL_CAPATH",
+            "Path",
+        ]
+        .map(std::ffi::OsString::from);
+        assert_eq!(
+            scrubbed_git_vars_with_case(keys.clone(), true),
+            ["Git_Dir", "git_askpass"].map(std::ffi::OsString::from),
+            "on Windows a mixed-case GIT_ variable is removed and mixed-case CA trust is kept"
+        );
+        assert!(
+            scrubbed_git_vars_with_case(keys, false).is_empty(),
+            "where names are case-sensitive, git reads only the upper-case names"
         );
     }
 
