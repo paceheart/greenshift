@@ -140,8 +140,49 @@ pub struct Remote {
     scratch: TempDir,
     url: String,
     token: Option<SecretString>,
+    /// `-c` arguments carrying the caller's own CA trust settings into the isolated git.
+    ca_config: Vec<String>,
     timeout: Duration,
     cancellation: Arc<AtomicBool>,
+}
+
+/// Git settings that only choose which certificate authorities git trusts. The isolated
+/// transport ignores the caller's system and global gitconfig, so a CA trusted only there
+/// is carried in explicitly. Repository-local config is never read: the repository is
+/// untrusted input.
+const KEPT_GIT_CONFIG: [&str; 2] = ["http.sslCAInfo", "http.sslCAPath"];
+
+/// `-c key=value` arguments for each `KEPT_GIT_CONFIG` key the caller's gitconfig sets.
+/// `read(scope, key)` answers from `--global` or `--system`; global wins, as in git.
+fn inherited_ca_config(read: impl Fn(&str, &str) -> Option<String>) -> Vec<String> {
+    KEPT_GIT_CONFIG
+        .iter()
+        .filter_map(|key| {
+            let value = read("--global", key).or_else(|| read("--system", key))?;
+            Some(["-c".to_owned(), format!("{key}={value}")])
+        })
+        .flatten()
+        .collect()
+}
+
+/// Reads one key from the caller's own gitconfig in one scope, outside any repository.
+fn caller_git_config(scope: &str, key: &str) -> Option<String> {
+    let outside = tempfile::tempdir().ok()?;
+    let output = Command::new("git")
+        .current_dir(outside.path())
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .args(["config", scope, "--type=path", "--get", key])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    let value = value.strip_suffix('\n').unwrap_or(&value);
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 // A git operation owns the entire helper process group, not just its immediate
@@ -204,6 +245,7 @@ impl Remote {
             scratch: tempfile::tempdir().map_err(error)?,
             url,
             token,
+            ca_config: inherited_ca_config(caller_git_config),
             timeout: TIMEOUT,
             cancellation,
         };
@@ -271,6 +313,7 @@ impl Remote {
                 "-c",
                 "http.followRedirects=false",
             ])
+            .args(&self.ca_config)
             .args(args)
             .stdin(Stdio::from(stdin))
             .stdout(stdout.try_clone().map_err(error)?)
@@ -697,6 +740,7 @@ mod tests {
             scratch: tempfile::tempdir().unwrap(),
             url: String::new(),
             token: None,
+            ca_config: Vec::new(),
             timeout: TIMEOUT,
             cancellation: Arc::clone(&cancellation),
         };
@@ -720,6 +764,7 @@ mod tests {
             scratch: tempfile::tempdir().unwrap(),
             url: String::new(),
             token: None,
+            ca_config: Vec::new(),
             timeout: TIMEOUT,
             cancellation: Arc::new(AtomicBool::new(true)),
         };
@@ -746,6 +791,7 @@ mod tests {
             scratch: tempfile::tempdir().unwrap(),
             url: String::new(),
             token: None,
+            ca_config: Vec::new(),
             timeout: TIMEOUT,
             cancellation: Arc::clone(&cancellation),
         };
@@ -788,6 +834,7 @@ mod tests {
             scratch: tempfile::tempdir().unwrap(),
             url: String::new(),
             token: None,
+            ca_config: Vec::new(),
             timeout: TIMEOUT,
             cancellation: Arc::new(AtomicBool::new(false)),
         };
@@ -928,6 +975,37 @@ mod tests {
                 ))
             ));
         }
+    }
+
+    #[test]
+    fn test_inherited_ca_config_carries_global_then_system_ca_settings() {
+        let read = |scope: &str, key: &str| match (scope, key) {
+            ("--global", "http.sslCAPath") => Some("/home/ci/ca.d".to_owned()),
+            ("--system", "http.sslCAPath") => Some("/etc/ssl/ignored".to_owned()),
+            ("--system", "http.sslCAInfo") => Some("/etc/ssl/internal-ca.pem".to_owned()),
+            _ => None,
+        };
+        assert_eq!(
+            inherited_ca_config(read),
+            [
+                "-c",
+                "http.sslCAInfo=/etc/ssl/internal-ca.pem",
+                "-c",
+                "http.sslCAPath=/home/ci/ca.d",
+            ],
+            "system fills in where global is unset, and global wins where both are set"
+        );
+        assert!(inherited_ca_config(|_, _| None).is_empty());
+    }
+
+    #[test]
+    fn test_caller_git_config_reads_a_scope_outside_any_repository() {
+        // The caller's own config is read whatever repository the process runs in; a
+        // missing key is None, not an empty value.
+        assert_eq!(
+            caller_git_config("--global", "greenshift.no-such-key"),
+            None
+        );
     }
 
     #[test]
