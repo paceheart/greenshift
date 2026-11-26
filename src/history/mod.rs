@@ -25,15 +25,24 @@ pub const HISTORY_REF: &str = "refs/greenshift/history";
 const BLOB: &str = "history.sqlite.gz";
 const TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Inherited git variables that only choose which certificate authorities
+/// git trusts. CI runners behind a private CA set them for every job; without
+/// them every HTTPS history operation fails verification.
+const KEPT_GIT_VARS: [&str; 2] = ["GIT_SSL_CAINFO", "GIT_SSL_CAPATH"];
+
 /// The inherited environment variables removed from every git child.
 ///
 /// Git's inherited configuration can run hooks, redirect object stores, or
-/// install remote helpers. Only the isolated transport owns its state.
+/// install remote helpers. Only the isolated transport owns its state, except
+/// for the CA trust in `KEPT_GIT_VARS`.
 fn scrubbed_git_vars(
     keys: impl IntoIterator<Item = std::ffi::OsString>,
 ) -> Vec<std::ffi::OsString> {
     keys.into_iter()
-        .filter(|key| key.to_string_lossy().starts_with("GIT_"))
+        .filter(|key| {
+            let key = key.to_string_lossy();
+            key.starts_with("GIT_") && !KEPT_GIT_VARS.contains(&key.as_ref())
+        })
         .collect()
 }
 
@@ -919,6 +928,34 @@ mod tests {
                 ))
             ));
         }
+    }
+
+    #[test]
+    fn test_git_scrub_keeps_ca_trust_and_removes_the_rest() {
+        let keys = [
+            "GIT_SSL_CAINFO",
+            "GIT_SSL_CAPATH",
+            "GIT_SSL_NO_VERIFY",
+            "GIT_DIR",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_SSH_COMMAND",
+            "GIT_ASKPASS",
+            "SSL_CERT_FILE",
+            "PATH",
+        ]
+        .map(std::ffi::OsString::from);
+        let removed = scrubbed_git_vars(keys);
+        assert_eq!(
+            removed,
+            [
+                "GIT_SSL_NO_VERIFY",
+                "GIT_DIR",
+                "GIT_CONFIG_GLOBAL",
+                "GIT_SSH_COMMAND",
+                "GIT_ASKPASS",
+            ]
+            .map(std::ffi::OsString::from)
+        );
     }
 
     #[test]
