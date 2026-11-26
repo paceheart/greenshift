@@ -25,6 +25,18 @@ pub const HISTORY_REF: &str = "refs/greenshift/history";
 const BLOB: &str = "history.sqlite.gz";
 const TIMEOUT: Duration = Duration::from_secs(60);
 
+/// The inherited environment variables removed from every git child.
+///
+/// Git's inherited configuration can run hooks, redirect object stores, or
+/// install remote helpers. Only the isolated transport owns its state.
+fn scrubbed_git_vars(
+    keys: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Vec<std::ffi::OsString> {
+    keys.into_iter()
+        .filter(|key| key.to_string_lossy().starts_with("GIT_"))
+        .collect()
+}
+
 /// Failure to transport or validate history. Callers decide whether to warn.
 #[derive(Debug, thiserror::Error)]
 pub enum HistoryError {
@@ -228,12 +240,8 @@ impl Remote {
             use std::os::unix::process::CommandExt;
             cmd.process_group(0);
         }
-        // Git's inherited configuration can run hooks, redirect object stores,
-        // or install remote helpers. Only the isolated transport owns its state.
-        for (key, _) in std::env::vars_os() {
-            if key.to_string_lossy().starts_with("GIT_") {
-                cmd.env_remove(key);
-            }
+        for key in scrubbed_git_vars(std::env::vars_os().map(|(key, _)| key)) {
+            cmd.env_remove(key);
         }
         cmd.current_dir(self.scratch.path())
             .env("HOME", self.scratch.path())
