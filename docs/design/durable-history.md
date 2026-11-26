@@ -42,10 +42,11 @@ only; authenticated HTTP and redirects are refused. Unauthenticated HTTP and
 local paths/file URLs are also supported; SSH/custom helpers are not. Token
 authentication on other platforms reports unsupported without breaking local
 ingestion/selection. URL-embedded credentials are refused. Git runs in its own
-temporary bare repository, with inherited Git configuration removed, hooks
-disabled, no checkout, and supervised operation duration/diagnostics. History
-payload stdin/stdout is not size-capped. Tokens do not enter
-command arguments or diagnostics.
+temporary bare repository, with inherited Git configuration removed (except the
+CA-trust variables `GIT_SSL_CAINFO`/`GIT_SSL_CAPATH`), hooks disabled, no
+checkout, and supervised operation duration/diagnostics. History payload
+stdin/stdout is not size-capped. Tokens do not enter command arguments or
+diagnostics.
 
 The wire protocol currently supports SHA-1 Git repositories; a SHA-256 remote
 history identity is refused explicitly rather than treated as a usable snapshot.
