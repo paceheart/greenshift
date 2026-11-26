@@ -204,7 +204,9 @@ fn caller_git_config(scope: &str, key: &str) -> Option<Option<OsString>> {
 
 /// One key's value in one scope, as git uses it: `None` if the scope leaves the key unset,
 /// `Some(None)` if git reads the value as unset (a missing `:(optional)` path). A set but
-/// empty value is `Some(Some(""))`: it overrides a lower scope, as in git.
+/// empty value is `Some(Some(""))`: it overrides a lower scope, as in git. A value git
+/// cannot expand at all (`~nobody/ca.pem`) is kept as written, so the isolated git refuses
+/// it as the caller's git does.
 ///
 /// Git interprets only the value that wins, so the raw value is read first and then
 /// expanded as a path; `--type=path` on the read itself would skip a missing optional path
@@ -219,7 +221,8 @@ fn git_config_value(
         git(),
         outside,
         [scope, "--includes", "--get", key].map(OsStr::new),
-    )?;
+    )
+    .ok()?;
     let mut default = OsString::from("--default=");
     default.push(&raw);
     // An absent file holds no keys, so git answers with the default, expanded.
@@ -232,17 +235,22 @@ fn git_config_value(
         OsStr::new("--get"),
         OsStr::new("greenshift.ca"),
     ];
-    Some(run_git_config(git(), outside, expand))
+    // Status 1 is the key not found: the default expanded to nothing.
+    Some(match run_git_config(git(), outside, expand) {
+        Ok(path) => Some(path),
+        Err(Some(1)) => None,
+        Err(_) => Some(raw),
+    })
 }
 
 /// `git config` with `args`, following includes as git does, run in the empty directory
 /// `outside`. Discovery stops there, so no repository (e.g. a checkout holding TMPDIR) can
-/// satisfy an `includeIf` or otherwise reach the read.
+/// satisfy an `includeIf` or otherwise reach the read. A failure carries git's exit status.
 fn run_git_config<'a>(
     mut git: Command,
     outside: &Path,
     args: impl IntoIterator<Item = &'a OsStr>,
-) -> Option<OsString> {
+) -> Result<OsString, Option<i32>> {
     let output = git
         .current_dir(outside)
         .env_remove("GIT_DIR")
@@ -252,16 +260,16 @@ fn run_git_config<'a>(
         // A parent holding the list separator cannot be a ceiling, so nothing is read.
         .env(
             "GIT_CEILING_DIRECTORIES",
-            std::env::join_paths([outside.parent()?]).ok()?,
+            std::env::join_paths([outside.parent().ok_or(None)?]).map_err(|_| None)?,
         )
         .arg("config")
         .args(args)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
-        .ok()?;
+        .map_err(|_| None)?;
     if !output.status.success() {
-        return None;
+        return Err(output.status.code());
     }
     let mut value = output.stdout;
     if value.last() == Some(&b'\n') {
@@ -270,10 +278,12 @@ fn run_git_config<'a>(
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStringExt;
-        Some(OsString::from_vec(value))
+        Ok(OsString::from_vec(value))
     }
     #[cfg(not(unix))]
-    String::from_utf8(value).ok().map(OsString::from)
+    String::from_utf8(value)
+        .map(OsString::from)
+        .map_err(|_| None)
 }
 
 // A git operation owns the entire helper process group, not just its immediate
@@ -1152,6 +1162,7 @@ mod tests {
         let mut ca = b"[http]\n\tsslCAInfo = ~/ca.pem\n[greenshift]\n\tempty =\n".to_vec();
         ca.extend_from_slice(b"\tbytes = /ca\xff.pem\n\tmissing = :(optional)/no/such.pem\n");
         ca.extend_from_slice(format!("\tpresent = :(optional){}\n", included.display()).as_bytes());
+        ca.extend_from_slice(b"\tunexpandable = ~greenshift-no-such-user/ca.pem\n");
         fs::write(&included, ca).unwrap();
         let steered = dir.path().join("steered.gitconfig");
         fs::write(&steered, "[http]\n\tsslCAPath = /steered\n").unwrap();
@@ -1199,6 +1210,11 @@ mod tests {
         assert_eq!(
             read("greenshift.present"),
             Some(Some(included.into_os_string()))
+        );
+        assert_eq!(
+            read("greenshift.unexpandable"),
+            Some(Some(OsString::from("~greenshift-no-such-user/ca.pem"))),
+            "a value git cannot expand is carried as written, for the isolated git to refuse"
         );
         assert_eq!(read("greenshift.no-such-key"), None);
     }
