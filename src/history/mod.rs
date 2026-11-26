@@ -208,9 +208,10 @@ fn caller_git_config(scope: &str, key: &str) -> Option<Option<OsString>> {
 /// cannot expand at all (`~nobody/ca.pem`) is kept as written, so the isolated git refuses
 /// it as the caller's git does.
 ///
-/// Git interprets only the value that wins, so the raw value is read first and then
-/// expanded as a path; `--type=path` on the read itself would skip a missing optional path
-/// and answer with an earlier value.
+/// The last value wins, and a missing optional path there leaves the key unset, so the raw
+/// value is read first and then expanded as a path; `--type=path` on the read itself would
+/// skip a missing optional path and answer with an earlier value. Git also aborts on an
+/// earlier or lower-scope value it cannot expand; that is not mirrored here.
 fn git_config_value(
     git: impl Fn() -> Command,
     outside: &Path,
