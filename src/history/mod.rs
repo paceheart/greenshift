@@ -177,8 +177,21 @@ fn inherited_ca_config(
 fn skips_system_config(nosystem: Option<&OsStr>) -> bool {
     nosystem.is_some_and(|value| {
         let value = value.to_string_lossy().to_ascii_lowercase();
-        !matches!(value.as_str(), "" | "false" | "no" | "off") && value.parse::<i64>() != Ok(0)
+        !matches!(value.as_str(), "" | "false" | "no" | "off") && !is_git_zero(&value)
     })
+}
+
+/// Whether git reads the lowercased `value` as the integer zero: C `strtoimax` in base 0
+/// (leading whitespace, a sign, a `0x` or `0b` prefix), then an optional `k`/`m`/`g` unit.
+fn is_git_zero(value: &str) -> bool {
+    let value = value.trim_start_matches([' ', '\t', '\n', '\x0b', '\x0c', '\r']);
+    let value = value.strip_prefix(['+', '-']).unwrap_or(value);
+    let value = value.strip_suffix(['k', 'm', 'g']).unwrap_or(value);
+    let digits = ["0x", "0b"]
+        .iter()
+        .find_map(|prefix| value.strip_prefix(prefix))
+        .unwrap_or(value);
+    !digits.is_empty() && digits.bytes().all(|digit| digit == b'0')
 }
 
 /// Reads one key from the caller's own gitconfig in one scope, outside any repository.
@@ -198,7 +211,11 @@ fn git_config_value(mut git: Command, outside: &Path, scope: &str, key: &str) ->
         .env_remove("GIT_WORK_TREE")
         // `git config` alone reads a legacy GIT_CONFIG as its file, refusing a scope.
         .env_remove("GIT_CONFIG")
-        .env("GIT_CEILING_DIRECTORIES", outside.parent()?)
+        // A parent holding the list separator cannot be a ceiling, so nothing is read.
+        .env(
+            "GIT_CEILING_DIRECTORIES",
+            std::env::join_paths([outside.parent()?]).ok()?,
+        )
         .args(["config", scope, "--includes", "--type=path", "--get", key])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -1053,11 +1070,16 @@ mod tests {
     #[test]
     fn test_skips_system_config_parses_nosystem_as_git_does() {
         // Observed with git 2.55: these leave the system file read...
-        for value in ["", "0", "false", "No", "off"] {
+        for value in [
+            "", "0", "false", "No", "off", "00", "+0", "-0x0", "0X0", "0b0", "0k", "0G", " 0",
+            "\t0",
+        ] {
             assert!(!skips_system_config(Some(OsStr::new(value))), "{value:?}");
         }
         // ...and these skip it (git rejects "bogus" outright).
-        for value in ["1", "2", "true", "YES", "on", "bogus"] {
+        for value in [
+            "1", "2", "true", "YES", "on", "bogus", "0x1", "1k", "0x", "08", "0kk", "0 ", "k",
+        ] {
             assert!(skips_system_config(Some(OsStr::new(value))), "{value:?}");
         }
         assert!(!skips_system_config(None));
@@ -1117,6 +1139,40 @@ mod tests {
             Some(&b"/ca\xff.pem"[..])
         );
         assert_eq!(read("greenshift.no-such-key"), None);
+    }
+
+    #[test]
+    fn test_git_config_value_reads_nothing_when_the_ceiling_cannot_be_expressed() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("checkout");
+        assert!(Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(&repo)
+            .status()
+            .unwrap()
+            .success());
+        // GIT_CEILING_DIRECTORIES is colon-separated, so a parent holding one stops nothing.
+        let outside = repo.join("tmp:dir").join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        let steered = dir.path().join("steered.gitconfig");
+        fs::write(&steered, "[http]\n\tsslCAPath = /steered\n").unwrap();
+        let global = dir.path().join("gitconfig");
+        fs::write(
+            &global,
+            format!(
+                "[includeIf \"gitdir:{}/\"]\n\tpath = {}\n",
+                repo.display(),
+                steered.display()
+            ),
+        )
+        .unwrap();
+        let mut git = Command::new("git");
+        git.env("HOME", dir.path())
+            .env("GIT_CONFIG_GLOBAL", &global);
+        assert_eq!(
+            git_config_value(git, &outside, "--global", "http.sslCAPath"),
+            None
+        );
     }
 
     #[test]
