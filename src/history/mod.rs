@@ -1296,6 +1296,11 @@ mod tests {
             git
         };
         let read = |scope: &str, key: &str| git_config_value(git, &outside, scope, key);
+        assert_eq!(
+            read("system", "http.sslCAInfo"),
+            Some(Some(OsString::from("/etc/ssl/internal-ca.pem"))),
+            "the system file is read"
+        );
         assert_eq!(inherited_ca_config(false, read), Vec::<OsString>::new());
     }
 
