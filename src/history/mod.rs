@@ -206,7 +206,8 @@ fn caller_git_config(scope: &str, key: &str) -> Option<Option<OsString>> {
 /// `Some(None)` if git reads the value as unset (a missing `:(optional)` path). A set but
 /// empty value is `Some(Some(""))`: it overrides a lower scope, as in git. A value git
 /// cannot expand at all (`~nobody/ca.pem`) is kept as written, so the isolated git refuses
-/// it as the caller's git does.
+/// it as the caller's git does. The exception is a `~/` path when the caller has no HOME:
+/// the isolated git expands it against its own scratch HOME instead of refusing it.
 ///
 /// The last value wins, and a missing optional path there leaves the key unset, so the raw
 /// value is read first and then expanded as a path; `--type=path` on the read itself would
