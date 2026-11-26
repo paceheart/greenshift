@@ -991,6 +991,11 @@ mod tests {
             scrubbed_git_vars_with_case(keys, false).is_empty(),
             "where names are case-sensitive, git reads only the upper-case names"
         );
+        assert_eq!(
+            scrubbed_git_vars(["Git_Dir"].map(std::ffi::OsString::from)).is_empty(),
+            !cfg!(windows),
+            "the scrub picks its case mode from the platform"
+        );
     }
 
     #[test]
