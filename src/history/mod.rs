@@ -153,17 +153,19 @@ pub struct Remote {
 const KEPT_GIT_CONFIG: [&str; 2] = ["http.sslCAInfo", "http.sslCAPath"];
 
 /// `-c key=value` arguments for each `KEPT_GIT_CONFIG` key the caller's gitconfig sets.
-/// `read(scope, key)` answers from `--global` or `--system`; global wins, as in git, and
-/// the system file is not consulted when the caller's git skips it (`skip_system`).
+/// `read(scope, key)` answers from `--global` or `--system`: `None` where the scope leaves
+/// the key unset, `Some(None)` where git reads its value as unset. The higher scope that
+/// sets the key wins, as in git, and the system file is not consulted when the caller's
+/// git skips it (`skip_system`).
 fn inherited_ca_config(
     skip_system: bool,
-    read: impl Fn(&str, &str) -> Option<OsString>,
+    read: impl Fn(&str, &str) -> Option<Option<OsString>>,
 ) -> Vec<OsString> {
     KEPT_GIT_CONFIG
         .iter()
         .filter_map(|key| {
             let value = read("--global", key)
-                .or_else(|| (!skip_system).then(|| read("--system", key)).flatten())?;
+                .or_else(|| (!skip_system).then(|| read("--system", key)).flatten())??;
             let mut setting = OsString::from(format!("{key}="));
             setting.push(value);
             Some([OsString::from("-c"), setting])
@@ -195,16 +197,52 @@ fn is_git_zero(value: &str) -> bool {
 }
 
 /// Reads one key from the caller's own gitconfig in one scope, outside any repository.
-fn caller_git_config(scope: &str, key: &str) -> Option<OsString> {
+fn caller_git_config(scope: &str, key: &str) -> Option<Option<OsString>> {
     let outside = tempfile::tempdir().ok()?;
-    git_config_value(Command::new("git"), outside.path(), scope, key)
+    git_config_value(|| Command::new("git"), outside.path(), scope, key)
 }
 
-/// `git config` for one key in one scope, following includes as git does, run in the empty
-/// directory `outside`. Discovery stops there, so no repository (e.g. a checkout holding
-/// TMPDIR) can satisfy an `includeIf` or otherwise reach the read. A set but empty value
-/// is `Some("")`: it overrides a lower scope, as in git.
-fn git_config_value(mut git: Command, outside: &Path, scope: &str, key: &str) -> Option<OsString> {
+/// One key's value in one scope, as git uses it: `None` if the scope leaves the key unset,
+/// `Some(None)` if git reads the value as unset (a missing `:(optional)` path). A set but
+/// empty value is `Some(Some(""))`: it overrides a lower scope, as in git.
+///
+/// Git interprets only the value that wins, so the raw value is read first and then
+/// expanded as a path; `--type=path` on the read itself would skip a missing optional path
+/// and answer with an earlier value.
+fn git_config_value(
+    git: impl Fn() -> Command,
+    outside: &Path,
+    scope: &str,
+    key: &str,
+) -> Option<Option<OsString>> {
+    let raw = run_git_config(
+        git(),
+        outside,
+        [scope, "--includes", "--get", key].map(OsStr::new),
+    )?;
+    let mut default = OsString::from("--default=");
+    default.push(&raw);
+    // An absent file holds no keys, so git answers with the default, expanded.
+    let none = outside.join("none");
+    let expand = [
+        OsStr::new("--file"),
+        none.as_os_str(),
+        OsStr::new("--type=path"),
+        &default,
+        OsStr::new("--get"),
+        OsStr::new("greenshift.ca"),
+    ];
+    Some(run_git_config(git(), outside, expand))
+}
+
+/// `git config` with `args`, following includes as git does, run in the empty directory
+/// `outside`. Discovery stops there, so no repository (e.g. a checkout holding TMPDIR) can
+/// satisfy an `includeIf` or otherwise reach the read.
+fn run_git_config<'a>(
+    mut git: Command,
+    outside: &Path,
+    args: impl IntoIterator<Item = &'a OsStr>,
+) -> Option<OsString> {
     let output = git
         .current_dir(outside)
         .env_remove("GIT_DIR")
@@ -216,7 +254,8 @@ fn git_config_value(mut git: Command, outside: &Path, scope: &str, key: &str) ->
             "GIT_CEILING_DIRECTORIES",
             std::env::join_paths([outside.parent()?]).ok()?,
         )
-        .args(["config", scope, "--includes", "--type=path", "--get", key])
+        .arg("config")
+        .args(args)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -1035,9 +1074,11 @@ mod tests {
     #[test]
     fn test_inherited_ca_config_carries_global_then_system_ca_settings() {
         let read = |scope: &str, key: &str| match (scope, key) {
-            ("--global", "http.sslCAPath") => Some(OsString::from("/home/ci/ca.d")),
-            ("--system", "http.sslCAPath") => Some(OsString::from("/etc/ssl/ignored")),
-            ("--system", "http.sslCAInfo") => Some(OsString::from("/etc/ssl/internal-ca.pem")),
+            ("--global", "http.sslCAPath") => Some(Some(OsString::from("/home/ci/ca.d"))),
+            ("--system", "http.sslCAPath") => Some(Some(OsString::from("/etc/ssl/ignored"))),
+            ("--system", "http.sslCAInfo") => {
+                Some(Some(OsString::from("/etc/ssl/internal-ca.pem")))
+            }
             _ => None,
         };
         assert_eq!(
@@ -1056,13 +1097,21 @@ mod tests {
             "a caller whose git skips the system file gets no system setting"
         );
         let empty_global = |scope: &str, _: &str| match scope {
-            "--global" => Some(OsString::new()),
-            _ => Some(OsString::from("/etc/ssl/internal-ca.pem")),
+            "--global" => Some(Some(OsString::new())),
+            _ => Some(Some(OsString::from("/etc/ssl/internal-ca.pem"))),
         };
         assert_eq!(
             inherited_ca_config(false, empty_global),
             ["-c", "http.sslCAInfo=", "-c", "http.sslCAPath="],
             "an empty global value overrides system, as in git"
+        );
+        let unset_global = |scope: &str, _: &str| match scope {
+            "--global" => Some(None),
+            _ => Some(Some(OsString::from("/etc/ssl/internal-ca.pem"))),
+        };
+        assert!(
+            inherited_ca_config(false, unset_global).is_empty(),
+            "a global value git reads as unset overrides system, as in git"
         );
         assert!(inherited_ca_config(false, |_, _| None).is_empty());
     }
@@ -1101,7 +1150,8 @@ mod tests {
         fs::create_dir_all(&outside).unwrap();
         let included = dir.path().join("ca.gitconfig");
         let mut ca = b"[http]\n\tsslCAInfo = ~/ca.pem\n[greenshift]\n\tempty =\n".to_vec();
-        ca.extend_from_slice(b"\tbytes = /ca\xff.pem\n");
+        ca.extend_from_slice(b"\tbytes = /ca\xff.pem\n\tmissing = :(optional)/no/such.pem\n");
+        ca.extend_from_slice(format!("\tpresent = :(optional){}\n", included.display()).as_bytes());
         fs::write(&included, ca).unwrap();
         let steered = dir.path().join("steered.gitconfig");
         fs::write(&steered, "[http]\n\tsslCAPath = /steered\n").unwrap();
@@ -1116,16 +1166,20 @@ mod tests {
             ),
         )
         .unwrap();
-        let read = |key: &str| {
+        // The caller's environment may name the checkout too, as inside a hook.
+        let git = || {
             let mut git = Command::new("git");
             git.env("HOME", dir.path())
                 .env("GIT_CONFIG_GLOBAL", &global)
-                .env("GIT_CONFIG", &steered);
-            git_config_value(git, &outside, "--global", key)
+                .env("GIT_CONFIG", &steered)
+                .env("GIT_DIR", repo.join(".git"))
+                .env("GIT_WORK_TREE", &repo);
+            git
         };
+        let read = |key: &str| git_config_value(git, &outside, "--global", key);
         assert_eq!(
             read("http.sslCAInfo"),
-            Some(dir.path().join("ca.pem").into_os_string()),
+            Some(Some(dir.path().join("ca.pem").into_os_string())),
             "an included value is read, with its path expanded against the caller's HOME"
         );
         assert_eq!(
@@ -1133,10 +1187,18 @@ mod tests {
             None,
             "the surrounding checkout does not satisfy an includeIf"
         );
-        assert_eq!(read("greenshift.empty"), Some(OsString::new()));
+        assert_eq!(read("greenshift.empty"), Some(Some(OsString::new())));
         assert_eq!(
-            read("greenshift.bytes").as_deref().map(OsStrExt::as_bytes),
+            read("greenshift.bytes")
+                .flatten()
+                .as_deref()
+                .map(OsStrExt::as_bytes),
             Some(&b"/ca\xff.pem"[..])
+        );
+        assert_eq!(read("greenshift.missing"), Some(None));
+        assert_eq!(
+            read("greenshift.present"),
+            Some(Some(included.into_os_string()))
         );
         assert_eq!(read("greenshift.no-such-key"), None);
     }
@@ -1166,13 +1228,47 @@ mod tests {
             ),
         )
         .unwrap();
-        let mut git = Command::new("git");
-        git.env("HOME", dir.path())
-            .env("GIT_CONFIG_GLOBAL", &global);
+        let git = || {
+            let mut git = Command::new("git");
+            git.env("HOME", dir.path())
+                .env("GIT_CONFIG_GLOBAL", &global);
+            git
+        };
         assert_eq!(
             git_config_value(git, &outside, "--global", "http.sslCAPath"),
             None
         );
+    }
+
+    #[test]
+    fn test_inherited_ca_config_treats_a_missing_optional_path_as_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let system = dir.path().join("system.gitconfig");
+        fs::write(
+            &system,
+            "[http]\n\tsslCAInfo = /etc/ssl/internal-ca.pem\n\tsslCAPath = /etc/ssl/certs\n",
+        )
+        .unwrap();
+        // Git takes the last value, then reads a missing optional path as unset: neither an
+        // earlier global value nor the system one applies.
+        let global = dir.path().join("gitconfig");
+        fs::write(
+            &global,
+            "[http]\n\tsslCAInfo = :(optional)/no/such/ca.pem\n\tsslCAPath = /home/ci/ca.d\n\
+             \tsslCAPath = :(optional)/no/such/ca.d\n",
+        )
+        .unwrap();
+        let git = || {
+            let mut git = Command::new("git");
+            git.env("HOME", dir.path())
+                .env("GIT_CONFIG_GLOBAL", &global)
+                .env("GIT_CONFIG_SYSTEM", &system);
+            git
+        };
+        let read = |scope: &str, key: &str| git_config_value(git, &outside, scope, key);
+        assert_eq!(inherited_ca_config(false, read), Vec::<OsString>::new());
     }
 
     #[test]
@@ -1181,7 +1277,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut remote = remote_repository(&dir.path().join("remote.git"));
         remote.ca_config = inherited_ca_config(false, |scope, key| {
-            (scope == "--global" && key == "http.sslCAInfo").then(|| OsString::from("/ca.pem"))
+            (scope == "--global" && key == "http.sslCAInfo")
+                .then(|| Some(OsString::from("/ca.pem")))
         });
         let script = dir.path().join("print-args");
         fs::write(&script, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
